@@ -1,0 +1,6 @@
+{
+  "name": "Nuki Events",
+  "content": "custom_components/nuki_events",
+  "render_readme": true,
+  "zip_release": false
+}
