@@ -4,9 +4,27 @@
     "flow_title": "Nuki Events",
     "step": {
       "user": {
-        "title": "Authenticate with Nuki",
-        "description": "Continue to authorize Home Assistant with your Nuki Web account."
+        "title": "Connect to Nuki",
+        "description": "Enter your Nuki OAuth client credentials from Nuki Web (Advanced API integration).",
+        "data": {
+          "client_id": "Client ID",
+          "client_secret": "Client Secret"
+        }
+      },
+      "reauth": {
+        "title": "Re-authenticate with Nuki",
+        "description": "Your Nuki token expired or was revoked. Please log in again.",
+        "data": {
+          "client_id": "Client ID",
+          "client_secret": "Client Secret"
+        }
       }
+    },
+    "error": {
+      "invalid_state": "Invalid state value returned from Nuki. Please retry."
+    },
+    "abort": {
+      "reauth_successful": "Re-authentication was successful."
     }
   }
 }

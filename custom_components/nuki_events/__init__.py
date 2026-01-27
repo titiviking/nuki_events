@@ -1,108 +1,86 @@
-"""The Nuki Events integration."""
 from __future__ import annotations
 
-from aiohttp import web
+import logging
 
-from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import config_entry_oauth2_flow
-from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.network import get_url
 
 from .api import NukiApi
+from .coordinator import NukiDataCoordinator
 from .const import (
-    CONF_WEBHOOK_ID,
-    CONF_NUKI_WEBHOOK_ID,
-    DATA_API,
-    DATA_LAST_EVENT,
-    DATA_WEBHOOKS,
     DOMAIN,
-    SIGNAL_EVENT_RECEIVED,
+    PLATFORMS,
+    WEBHOOK_PATH,
+    DEFAULT_WEBHOOK_FEATURES,
+    CONF_WEBHOOK_ID,
+    CONF_WEBHOOK_SECRET,
 )
+from .webhook import NukiWebhookView
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up the integration."""
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN].setdefault(DATA_WEBHOOKS, {})
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Nuki Events from a config entry."""
-    implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
-        hass, entry
-    )
-    session = config_entry_oauth2_flow.OAuth2Session(hass, entry, implementation)
-    api = NukiApi(session)
+    hass.data.setdefault(DOMAIN, {})
+    if not hass.data[DOMAIN].get("_view_registered"):
+        hass.http.register_view(NukiWebhookView(hass))
+        hass.data[DOMAIN]["_view_registered"] = True
 
-    domain_data = hass.data.setdefault(DOMAIN, {})
-    domain_data.setdefault(DATA_WEBHOOKS, {})
-    domain_data[entry.entry_id] = {DATA_API: api, DATA_LAST_EVENT: None}
+    api = NukiApi(hass, entry)
+    coordinator = NukiDataCoordinator(hass, api)
+    await coordinator.async_config_entry_first_refresh()
 
-    webhook_id = entry.data.get(CONF_WEBHOOK_ID)
-    if not webhook_id:
-        webhook_id = webhook.async_generate_id()
-        hass.config_entries.async_update_entry(
-            entry, data={**entry.data, CONF_WEBHOOK_ID: webhook_id}
-        )
+    hass.data[DOMAIN][entry.entry_id] = {
+        "coordinator": coordinator,
+        "webhook_secret": entry.data.get(CONF_WEBHOOK_SECRET),
+        "webhook_id": entry.data.get(CONF_WEBHOOK_ID),
+        "api": api,
+    }
 
-    domain_data[DATA_WEBHOOKS][webhook_id] = entry.entry_id
+    base = get_url(hass, prefer_external=True)
+    webhook_url = f"{base}{WEBHOOK_PATH}/{entry.entry_id}"
+    _LOGGER.debug("Computed external webhook URL for Nuki: %s", webhook_url)
 
-    webhook.async_register(
-        hass,
-        DOMAIN,
-        "Nuki Events",
-        webhook_id,
-        _handle_webhook,
-    )
+    try:
+        resp = await api.register_decentral_webhook(webhook_url=webhook_url, features=DEFAULT_WEBHOOK_FEATURES)
+        webhook_id = resp.get("id")
+        secret = resp.get("secret")
+        _LOGGER.info("Registered Nuki decentral webhook (entry=%s, id=%s)", entry.entry_id, webhook_id)
 
-    webhook_url = webhook.async_generate_url(hass, webhook_id)
-    nuki_webhook_id = entry.data.get(CONF_NUKI_WEBHOOK_ID)
-    if not nuki_webhook_id:
-        nuki_webhook_id = await api.register_webhook(webhook_url)
-        hass.config_entries.async_update_entry(
-            entry, data={**entry.data, CONF_NUKI_WEBHOOK_ID: nuki_webhook_id}
-        )
+        new_data = dict(entry.data)
+        if webhook_id is not None:
+            new_data[CONF_WEBHOOK_ID] = int(webhook_id)
+            hass.data[DOMAIN][entry.entry_id]["webhook_id"] = int(webhook_id)
+        if secret:
+            new_data[CONF_WEBHOOK_SECRET] = secret
+            hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = secret
+
+        hass.config_entries.async_update_entry(entry, data=new_data)
+    except Exception as err:
+        _LOGGER.error("Failed to register Nuki decentral webhook: %s", err)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
-    domain_data = hass.data.get(DOMAIN, {})
-    webhook_id = entry.data.get(CONF_WEBHOOK_ID)
-    nuki_webhook_id = entry.data.get(CONF_NUKI_WEBHOOK_ID)
-    if webhook_id:
-        webhook.async_unregister(hass, webhook_id)
-        domain_data.get(DATA_WEBHOOKS, {}).pop(webhook_id, None)
+    data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    api: NukiApi | None = data.get("api")
+    webhook_id = data.get("webhook_id") or entry.data.get(CONF_WEBHOOK_ID)
 
-    if nuki_webhook_id:
-        api: NukiApi = domain_data[entry.entry_id][DATA_API]
-        await api.unregister_webhook(nuki_webhook_id)
+    if api and webhook_id:
+        try:
+            await api.delete_decentral_webhook(int(webhook_id))
+            _LOGGER.info("Deleted Nuki decentral webhook id=%s (entry=%s)", webhook_id, entry.entry_id)
+        except Exception as err:
+            _LOGGER.warning("Could not delete Nuki decentral webhook id=%s: %s", webhook_id, err)
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        domain_data.pop(entry.entry_id, None)
+        hass.data[DOMAIN].pop(entry.entry_id, None)
     return unload_ok
-
-
-async def _handle_webhook(
-    hass: HomeAssistant, webhook_id: str, request: web.Request
-) -> web.Response:
-    """Handle webhook calls from Nuki."""
-    payload = await request.json()
-    domain_data = hass.data.get(DOMAIN, {})
-    entry_id = domain_data.get(DATA_WEBHOOKS, {}).get(webhook_id)
-    if not entry_id:
-        return web.Response(status=404)
-
-    api: NukiApi = domain_data[entry_id][DATA_API]
-    event = await api.parse_event(payload)
-    domain_data[entry_id][DATA_LAST_EVENT] = event
-    async_dispatcher_send(hass, SIGNAL_EVENT_RECEIVED.format(entry_id))
-    return web.Response(status=200)

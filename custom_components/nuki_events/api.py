@@ -1,100 +1,125 @@
-"""API client for Nuki Web."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
-from aiohttp import ClientResponseError
-
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.config_entry_oauth2_flow import OAuth2Session
 
-from .const import NUKI_BASE_URL
+from .const import API_BASE, OAUTH2_TOKEN
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
-class NukiEvent:
-    """Parsed Nuki event."""
-
-    actor: str | None
-    timestamp: str | None
-    smartlock_name: str | None
-    source: str | None
-
-
 class NukiApi:
-    """Nuki Web API client."""
+    hass: HomeAssistant
+    entry: ConfigEntry
 
-    def __init__(self, session: OAuth2Session) -> None:
-        """Initialize the API client."""
-        self._session = session
-        self._http = async_get_clientsession(session.hass)
+    def _now(self) -> int:
+        # Monotonic time (seconds) for expires_at comparisons
+        return int(self.hass.loop.time())
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        """Make an authenticated request."""
-        url = f"{NUKI_BASE_URL}{path}"
-        token = await self._session.async_get_access_token()
-        headers = kwargs.pop("headers", {})
-        headers["Authorization"] = f"Bearer {token}"
-        async with self._http.request(method, url, headers=headers, **kwargs) as resp:
-            resp.raise_for_status()
+    async def _ensure_token_valid(self) -> dict[str, Any]:
+        token: dict[str, Any] = dict(self.entry.data.get("token") or {})
+        if not token:
+            raise ConfigEntryAuthFailed("Missing OAuth token in config entry")
+
+
+        expires_at = token.get("expires_at")
+        if expires_at is None:
+            expires_in = int(token.get("expires_in", 3600))
+            token["expires_at"] = self._now() + expires_in - 60
+            expires_at = token["expires_at"]
+
+        if self._now() < int(expires_at):
+            return token
+
+        refresh = token.get("refresh_token")
+        if not refresh:
+            raise ConfigEntryAuthFailed("OAuth token expired and no refresh_token is available")
+
+
+        client_id = self.entry.data.get("client_id")
+        client_secret = self.entry.data.get("client_secret")
+        if not client_id or not client_secret:
+            raise ConfigEntryAuthFailed("Missing client_id/client_secret in config entry")
+
+
+        session = async_get_clientsession(self.hass)
+        payload = {
+            "grant_type": "refresh_token",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh,
+        }
+
+        _LOGGER.debug("Refreshing Nuki OAuth token")
+        async with session.post(
+            OAUTH2_TOKEN,
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        ) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                raise ConfigEntryAuthFailed(f"Token refresh failed ({resp.status}): {body}")
+            new_token = await resp.json()
+
+        expires_in = int(new_token.get("expires_in", 3600))
+        new_token["expires_at"] = self._now() + expires_in - 60
+
+        # Preserve refresh_token if server doesn't return it
+        if "refresh_token" not in new_token and refresh:
+            new_token["refresh_token"] = refresh
+
+        new_data = dict(self.entry.data)
+        new_data["token"] = new_token
+        self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+
+        # refresh local reference
+        self.entry = self.hass.config_entries.async_get_entry(self.entry.entry_id) or self.entry
+        return new_token
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict | None = None,
+        params: Mapping[str, str] | None = None,
+    ) -> Any:
+        session = async_get_clientsession(self.hass)
+        token = await self._ensure_token_valid()
+
+        headers = {"accept": "application/json", "authorization": f"Bearer {token['access_token']}"}
+        url = f"{API_BASE}{path}"
+
+        _LOGGER.debug("Nuki API request: %s %s params=%s json=%s", method, url, params, json)
+        resp = await session.request(method, url, headers=headers, json=json, params=params)
+        _LOGGER.debug("Nuki API response: %s %s -> status=%s content_type=%s", method, url, resp.status, resp.content_type)
+
+        resp.raise_for_status()
+        if resp.status == 204:
+            return None
+        if resp.content_type == "application/json":
             return await resp.json()
+        return await resp.text()
 
-    async def list_webhooks(self) -> list[dict[str, Any]]:
-        """Return configured webhooks from Nuki Web."""
-        data = await self._request("GET", "/webhooks")
-        return data if isinstance(data, list) else data.get("webhooks", [])
+    async def list_smartlocks(self) -> list[dict]:
+        return await self._request("GET", "/smartlock")  # type: ignore[return-value]
 
-    async def register_webhook(self, webhook_url: str) -> str:
-        """Register the webhook endpoint with Nuki Web."""
-        existing = await self.list_webhooks()
-        for hook in existing:
-            if hook.get("url") == webhook_url:
-                return str(hook.get("id"))
-        payload = {"url": webhook_url, "eventTypes": ["device_log"]}
-        try:
-            data = await self._request("POST", "/webhooks", json=payload)
-        except ClientResponseError as err:
-            if err.status != 409:
-                raise
-            existing = await self.list_webhooks()
-            for hook in existing:
-                if hook.get("url") == webhook_url:
-                    return str(hook.get("id"))
-            raise
-        return str(data.get("id"))
+    async def get_all_auths(self) -> list[dict]:
+        return await self._request("GET", "/smartlock/auth")  # type: ignore[return-value]
 
-    async def unregister_webhook(self, webhook_id: str) -> None:
-        """Remove a webhook registration on Nuki Web."""
-        await self._request("DELETE", f"/webhooks/{webhook_id}")
-
-    async def get_smartlock_name(self, smartlock_id: int | None) -> str | None:
-        """Fetch the smartlock name for a lock id."""
-        if smartlock_id is None:
-            return None
-        data = await self._request("GET", f"/smartlocks/{smartlock_id}")
-        return data.get("name")
-
-    async def get_actor_name(self, actor_id: int | None) -> str | None:
-        """Fetch the actor name for a user id."""
-        if actor_id is None:
-            return None
-        data = await self._request("GET", f"/users/{actor_id}")
-        return data.get("name")
-
-    async def parse_event(self, payload: dict[str, Any]) -> NukiEvent:
-        """Parse webhook payload into a structured event."""
-        data = payload.get("data", payload)
-        log = data.get("deviceLog", data.get("device_log", {}))
-        actor_id = log.get("userId") or log.get("user_id")
-        smartlock_id = log.get("smartlockId") or log.get("smartlock_id")
-        actor_name = log.get("name") or await self.get_actor_name(actor_id)
-        smartlock_name = log.get("smartlockName") or await self.get_smartlock_name(
-            smartlock_id
+    async def register_decentral_webhook(self, webhook_url: str, features: list[str]) -> dict:
+        return await self._request(
+            "PUT",
+            "/api/decentralWebhook",
+            json={"webhookUrl": webhook_url, "webhookFeatures": features},
         )
-        return NukiEvent(
-            actor=actor_name,
-            timestamp=log.get("timestamp") or log.get("time"),
-            smartlock_name=smartlock_name,
-            source=log.get("source"),
-        )
+
+    async def delete_decentral_webhook(self, webhook_id: int) -> None:
+        await self._request("DELETE", f"/api/decentralWebhook/{webhook_id}")

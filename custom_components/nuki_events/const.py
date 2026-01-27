@@ -1,21 +1,31 @@
-"""Constants for the Nuki Events integration."""
+from __future__ import annotations
 
 DOMAIN = "nuki_events"
+PLATFORMS = ["sensor"]
+
+API_BASE = "https://api.nuki.io"
+OAUTH2_AUTHORIZE = "https://api.nuki.io/oauth/authorize"
+OAUTH2_TOKEN = "https://api.nuki.io/oauth/token"
+
+WEBHOOK_PATH = "/api/nuki_events/webhook"
 
 CONF_WEBHOOK_ID = "webhook_id"
-CONF_NUKI_WEBHOOK_ID = "nuki_webhook_id"
-DATA_API = "api"
-DATA_LAST_EVENT = "last_event"
-DATA_WEBHOOKS = "webhooks"
+CONF_WEBHOOK_SECRET = "webhook_secret"
 
-SIGNAL_EVENT_RECEIVED = "nuki_events_event_received_{}"
+WEBHOOK_FEATURE_DEVICE_STATUS = "DEVICE_STATUS"
+WEBHOOK_FEATURE_DEVICE_LOGS = "DEVICE_LOGS"
+WEBHOOK_FEATURE_DEVICE_AUTHS = "DEVICE_AUTHS"
 
-DEFAULT_OAUTH_NAME = "Nuki"
+DEFAULT_WEBHOOK_FEATURES = [
+    WEBHOOK_FEATURE_DEVICE_STATUS,
+    WEBHOOK_FEATURE_DEVICE_LOGS,
+    WEBHOOK_FEATURE_DEVICE_AUTHS,
+]
 
-NUKI_BASE_URL = "https://api.nuki.io"
-NUKI_OAUTH_AUTHORIZE = "https://web.nuki.io/oauth/authorize"
-NUKI_OAUTH_TOKEN = "https://web.nuki.io/oauth/token"
+DEFAULT_SCOPES = (
+    "account smartlock smartlock.readOnly smartlock.log smartlock.auth "
+    "webhook.decentral offline_access"
+)
 
-ATTR_TIMESTAMP = "timestamp"
-ATTR_SMARTLOCK_NAME = "smartlock_name"
-ATTR_SOURCE = "source"
+EVENT_NUKI_WEBHOOK = f"{DOMAIN}_webhook"
+EVENT_NUKI_LOCK_EVENT = f"{DOMAIN}_lock_event"
