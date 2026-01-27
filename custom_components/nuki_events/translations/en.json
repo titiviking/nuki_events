@@ -1,0 +1,12 @@
+{
+  "title": "Nuki Events",
+  "config": {
+    "flow_title": "Nuki Events",
+    "step": {
+      "user": {
+        "title": "Authenticate with Nuki",
+        "description": "Continue to authorize Home Assistant with your Nuki Web account."
+      }
+    }
+  }
+}
