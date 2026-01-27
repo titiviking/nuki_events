@@ -1,0 +1,16 @@
+{
+  "domain": "nuki_events",
+  "name": "Nuki Events",
+  "config_flow": true,
+  "documentation": "https://www.home-assistant.io/integrations/nuki_events",
+  "dependencies": ["webhook"],
+  "codeowners": [],
+  "requirements": [],
+  "iot_class": "cloud_push",
+  "version": "0.1.0",
+  "oauth2": {
+    "authorization_url": "https://web.nuki.io/oauth/authorize",
+    "token_url": "https://web.nuki.io/oauth/token",
+    "scopes": ["device.read", "log.read", "webhook.write"]
+  }
+}
