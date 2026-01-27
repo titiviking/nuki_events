@@ -32,6 +32,4 @@ The `sensor.smartlock_last_actor` entity exposes:
 - `smartlock_name`: The name of the smartlock.
 - `source`: The unlock source (fingerprint, keypad, etc.).
 
-## Testing
 
-No automated tests are included.
