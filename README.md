@@ -15,6 +15,15 @@ This repository provides a custom Home Assistant integration that listens for Nu
 3. Complete the OAuth2 flow to authorize access to your Nuki account.
 4. Ensure your Home Assistant instance is reachable by Nuki Web for webhook delivery.
 
+## HACS
+
+1. Open HACS in Home Assistant.
+2. Go to **Integrations** and open the menu (three dots) in the top right.
+3. Choose **Custom repositories**.
+4. Add the URL of this repository and select the category **Integration**.
+5. Install **Nuki Events** from HACS and restart Home Assistant.
+6. Add the integration via **Settings → Devices & Services**.
+
 ## Sensor Attributes
 
 The `sensor.smartlock_last_actor` entity exposes:
@@ -23,10 +32,4 @@ The `sensor.smartlock_last_actor` entity exposes:
 - `smartlock_name`: The name of the smartlock.
 - `source`: The unlock source (fingerprint, keypad, etc.).
 
-## Testing
 
-Run the lightweight checks included in this repo:
-
-```bash
-python -m pytest
-```
