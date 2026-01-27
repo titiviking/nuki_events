@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import secrets
 import time
 import urllib.parse
 
@@ -36,33 +35,32 @@ def _safe_url(url: str) -> str:
             qs["code"] = ["<masked>"]
         if "client_secret" in qs:
             qs["client_secret"] = ["<masked>"]
-        if "state" in qs and qs["state"]:
-            qs["state"] = [f"<masked:{len(qs['state'][0])}chars>"]
 
         # Flatten query (keep first value)
         flat = {k: v[0] if v else "" for k, v in qs.items()}
         new_query = urllib.parse.urlencode(flat)
 
-        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+        return urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, new_query, parts.fragment)
+        )
     except Exception:  # noqa: BLE001
         return "<unparseable url>"
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Config flow for Nuki Events with custom OAuth2 handling (client_secret_post)."""
+    """Config flow for Nuki Events with custom OAuth2 token exchange."""
 
     VERSION = 1
 
     @callback
     def _log_context(self, prefix: str) -> None:
         _LOGGER.debug(
-            "%s: flow_id=%s unique_id=%s context(source=%s entry_id=%s oauth_state_set=%s)",
+            "%s: flow_id=%s unique_id=%s context(source=%s entry_id=%s)",
             prefix,
             getattr(self, "flow_id", None),
             getattr(self, "unique_id", None),
             self.context.get("source"),
             self.context.get("entry_id"),
-            "oauth_state" in self.context,
         )
 
     async def async_step_user(self, user_input=None):
@@ -80,7 +78,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ),
             )
 
-        # Store credentials on the flow instance
         self._client_id = (user_input.get("client_id") or "").strip()
         self._client_secret = (user_input.get("client_secret") or "").strip()
 
@@ -92,7 +89,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         external_url = self.hass.config.external_url
         internal_url = self.hass.config.internal_url
-        _LOGGER.debug("HA URLs external_url=%s internal_url=%s", external_url, internal_url)
+        _LOGGER.debug(
+            "HA URLs external_url=%s internal_url=%s",
+            external_url,
+            internal_url,
+        )
 
         if not external_url:
             _LOGGER.error(
@@ -103,17 +104,19 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         redirect_uri = f"{external_url.rstrip('/')}/auth/external/callback"
 
-        # Generate and store state for CSRF protection
-        state = secrets.token_urlsafe(32)
-        self.context["oauth_state"] = state
+        # IMPORTANT:
+        # For async_external_step, Home Assistant needs to be able to route the callback
+        # back to this flow. It uses the 'state' parameter to do this.
+        # Therefore state MUST be the flow_id (or include it in a way HA understands).
+        state = self.flow_id
+
         self.context["oauth_created_at"] = int(time.time())
         self.context["oauth_redirect_uri"] = redirect_uri
 
         _LOGGER.debug(
-            "Prepared OAuth redirect_uri=%s state_len=%s state(masked)=%s",
+            "Prepared OAuth redirect_uri=%s state(flow_id)=%s",
             redirect_uri,
-            len(state),
-            _mask(state, keep=6),
+            state,
         )
 
         params = {
@@ -139,8 +142,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         returned_error_desc = user_input.get("error_description")
 
         _LOGGER.debug(
-            "OAuth callback received params: state=%s code=%s error=%s error_description=%s keys=%s",
-            f"<masked:{len(returned_state)}chars>" if returned_state else "<none>",
+            "OAuth callback received: state=%s code=%s error=%s error_description=%s keys=%s",
+            returned_state or "<none>",
             _mask(returned_code, keep=6),
             returned_error or "<none>",
             returned_error_desc or "<none>",
@@ -155,30 +158,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             return self.async_abort(reason="oauth_error")
 
-        expected_state = self.context.get("oauth_state")
-        _LOGGER.debug(
-            "Validating state: expected=%s received=%s created_at=%s redirect_uri=%s",
-            f"<masked:{len(expected_state)}chars>" if expected_state else "<none>",
-            f"<masked:{len(returned_state)}chars>" if returned_state else "<none>",
-            self.context.get("oauth_created_at"),
-            self.context.get("oauth_redirect_uri"),
-        )
-
-        if not expected_state:
+        # At this point HA already routed the callback to the correct flow.
+        # Still log a sanity check:
+        if returned_state != self.flow_id:
             _LOGGER.error(
-                "Missing expected oauth_state in flow context. "
-                "This often means: callback hit a different HA instance, the flow restarted, "
-                "or external_url/reverse-proxy is sending you elsewhere."
-            )
-            return self.async_abort(reason="invalid_state")
-
-        if returned_state != expected_state:
-            _LOGGER.error(
-                "State mismatch. expected_len=%s received_len=%s. "
-                "Possible causes: wrong HA instance/external_url, stale callback from earlier attempt, "
-                "reverse proxy rewriting, or browser opened a different flow.",
-                len(expected_state),
-                len(returned_state or ""),
+                "Unexpected state mismatch after routing. returned_state=%s flow_id=%s",
+                returned_state,
+                self.flow_id,
             )
             return self.async_abort(reason="invalid_state")
 
