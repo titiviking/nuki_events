@@ -38,12 +38,16 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._client_secret = user_input["client_secret"].strip()
         redirect_uri = f"{self.hass.config.external_url}/auth/external/callback"
 
+        # Generate a CSRF protection state and store it for validation on callback
+        state = secrets.token_urlsafe(32)
+        self.context["oauth_state"] = state
+
         params = {
             "response_type": "code",
             "client_id": self._client_id,
             "redirect_uri": redirect_uri,
             "scope": DEFAULT_SCOPES,
-            "state": self.flow_id,
+            "state": state,
         }
 
         auth_url = f"{OAUTH2_AUTHORIZE}?{urllib.parse.urlencode(params)}"
@@ -51,8 +55,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_external_step(step_id="authorize", url=auth_url)
 
     async def async_step_authorize(self, user_input: dict[str, Any]):
-        expected_state = self.context.get("oauth_state") or getattr(self, "_state", None)
-        if user_input.get("state") != expected_state:
+        expected_state = self.context.get("oauth_state")
+        if not expected_state or user_input.get("state") != expected_state:
             return self.async_abort(reason="invalid_state")
 
         code = user_input.get("code")
@@ -114,4 +118,3 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Home Assistant passes the existing config entry data in context
         self._reauth_entry_id = self.context.get("entry_id")
         return await self.async_step_user(user_input)
-
