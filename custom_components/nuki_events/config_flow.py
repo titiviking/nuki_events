@@ -6,9 +6,7 @@ from homeassistant.helpers import config_entry_oauth2_flow
 from .const import DEFAULT_OAUTH_NAME, DOMAIN
 
 
-class NukiOAuth2FlowHandler(
-    config_entry_oauth2_flow.OAuth2FlowHandler, domain=DOMAIN
-):
+class ConfigFlow(config_entry_oauth2_flow.OAuth2FlowHandler, domain=DOMAIN):
     """Handle OAuth2 configuration flow for Nuki."""
 
     async def async_oauth_create_entry(self, data):
