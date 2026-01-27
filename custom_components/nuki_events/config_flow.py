@@ -4,7 +4,6 @@ import logging
 import secrets
 import time
 import urllib.parse
-from typing import Any
 
 import voluptuous as vol
 
@@ -31,43 +30,42 @@ def _safe_url(url: str) -> str:
     try:
         parts = urllib.parse.urlsplit(url)
         qs = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
-        for key in ("client_secret", "code"):
-            if key in qs:
-                qs[key] = ["<masked>"]
-        if "state" in qs:
+
+        # Always mask these
+        if "code" in qs:
+            qs["code"] = ["<masked>"]
+        if "client_secret" in qs:
+            qs["client_secret"] = ["<masked>"]
+        if "state" in qs and qs["state"]:
             qs["state"] = [f"<masked:{len(qs['state'][0])}chars>"]
-        new_query = urllib.parse.urlencode({k: v[0] for k, v in qs.items()})
+
+        # Flatten query (keep first value)
+        flat = {k: v[0] if v else "" for k, v in qs.items()}
+        new_query = urllib.parse.urlencode(flat)
+
         return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
     except Exception:  # noqa: BLE001
         return "<unparseable url>"
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Config flow for Nuki Events using a dedicated OAuth2 implementation.
-
-    Nuki requires client_id/client_secret in the POST body (client_secret_post).
-    Home Assistant's built-in OAuth helpers use HTTP Basic Auth, so we implement
-    the token exchange ourselves.
-    """
+    """Config flow for Nuki Events with custom OAuth2 handling (client_secret_post)."""
 
     VERSION = 1
 
     @callback
     def _log_context(self, prefix: str) -> None:
-        # Helpful for troubleshooting cross-instance / flow-resume issues
         _LOGGER.debug(
-            "%s: flow_id=%s unique_id=%s context=%s",
+            "%s: flow_id=%s unique_id=%s context(source=%s entry_id=%s oauth_state_set=%s)",
             prefix,
             getattr(self, "flow_id", None),
             getattr(self, "unique_id", None),
-            {
-                "source": self.context.get("source"),
-                "entry_id": self.context.get("entry_id"),
-                "oauth_state_set": "oauth_state" in self.context,
-            },
+            self.context.get("source"),
+            self.context.get("entry_id"),
+            "oauth_state" in self.context,
         )
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None):
+    async def async_step_user(self, user_input=None):
         self._log_context("async_step_user(start)")
 
         if user_input is None:
@@ -82,7 +80,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ),
             )
 
-        # Store client credentials on the flow instance
+        # Store credentials on the flow instance
         self._client_id = (user_input.get("client_id") or "").strip()
         self._client_secret = (user_input.get("client_secret") or "").strip()
 
@@ -97,7 +95,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         _LOGGER.debug("HA URLs external_url=%s internal_url=%s", external_url, internal_url)
 
         if not external_url:
-            # This often causes redirect/callback to land on the wrong place
             _LOGGER.error(
                 "Home Assistant external_url is not set. "
                 "OAuth redirect_uri cannot be constructed reliably."
@@ -106,7 +103,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         redirect_uri = f"{external_url.rstrip('/')}/auth/external/callback"
 
-        # Generate a CSRF protection state and store it for validation on callback
+        # Generate and store state for CSRF protection
         state = secrets.token_urlsafe(32)
         self.context["oauth_state"] = state
         self.context["oauth_created_at"] = int(time.time())
@@ -129,9 +126,147 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         auth_url = f"{OAUTH2_AUTHORIZE}?{urllib.parse.urlencode(params)}"
         _LOGGER.debug("Starting external auth step, auth_url=%s", _safe_url(auth_url))
-        self._log_context("async_step_user(end->external_step)")
 
-        # This tells HA to open the browser and later resume to async_step_authorize
+        self._log_context("async_step_user(end->external_step)")
         return self.async_external_step(step_id="authorize", url=auth_url)
 
-    async def async_step_authorize(self, user_input: dict[str, An]()_
+    async def async_step_authorize(self, user_input):
+        self._log_context("async_step_authorize(start)")
+
+        returned_state = user_input.get("state")
+        returned_code = user_input.get("code")
+        returned_error = user_input.get("error")
+        returned_error_desc = user_input.get("error_description")
+
+        _LOGGER.debug(
+            "OAuth callback received params: state=%s code=%s error=%s error_description=%s keys=%s",
+            f"<masked:{len(returned_state)}chars>" if returned_state else "<none>",
+            _mask(returned_code, keep=6),
+            returned_error or "<none>",
+            returned_error_desc or "<none>",
+            list(user_input.keys()),
+        )
+
+        if returned_error:
+            _LOGGER.error(
+                "OAuth provider returned error=%s error_description=%s",
+                returned_error,
+                returned_error_desc,
+            )
+            return self.async_abort(reason="oauth_error")
+
+        expected_state = self.context.get("oauth_state")
+        _LOGGER.debug(
+            "Validating state: expected=%s received=%s created_at=%s redirect_uri=%s",
+            f"<masked:{len(expected_state)}chars>" if expected_state else "<none>",
+            f"<masked:{len(returned_state)}chars>" if returned_state else "<none>",
+            self.context.get("oauth_created_at"),
+            self.context.get("oauth_redirect_uri"),
+        )
+
+        if not expected_state:
+            _LOGGER.error(
+                "Missing expected oauth_state in flow context. "
+                "This often means: callback hit a different HA instance, the flow restarted, "
+                "or external_url/reverse-proxy is sending you elsewhere."
+            )
+            return self.async_abort(reason="invalid_state")
+
+        if returned_state != expected_state:
+            _LOGGER.error(
+                "State mismatch. expected_len=%s received_len=%s. "
+                "Possible causes: wrong HA instance/external_url, stale callback from earlier attempt, "
+                "reverse proxy rewriting, or browser opened a different flow.",
+                len(expected_state),
+                len(returned_state or ""),
+            )
+            return self.async_abort(reason="invalid_state")
+
+        if not returned_code:
+            _LOGGER.error("No authorization code received in callback.")
+            return self.async_abort(reason="invalid_state")
+
+        session = async_get_clientsession(self.hass)
+
+        redirect_uri = self.context.get("oauth_redirect_uri")
+        if not redirect_uri:
+            _LOGGER.error("redirect_uri missing from context; cannot exchange token.")
+            return self.async_abort(reason="no_external_url")
+
+        payload = {
+            "grant_type": "authorization_code",
+            "client_id": self._client_id,
+            "client_secret": self._client_secret,
+            "code": returned_code,
+            "redirect_uri": redirect_uri,
+        }
+
+        _LOGGER.debug(
+            "Exchanging code for token at %s with redirect_uri=%s client_id=%s code=%s",
+            OAUTH2_TOKEN,
+            redirect_uri,
+            _mask(self._client_id),
+            _mask(returned_code, keep=6),
+        )
+
+        async with session.post(
+            OAUTH2_TOKEN,
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        ) as resp:
+            text = await resp.text()
+            _LOGGER.debug(
+                "Token endpoint responded status=%s headers=%s body=%s",
+                resp.status,
+                dict(resp.headers),
+                text[:2000],
+            )
+
+            if resp.status != 200:
+                raise config_entries.ConfigEntryAuthFailed(
+                    f"Nuki token exchange failed ({resp.status}): {text}"
+                )
+
+            token = await resp.json()
+
+        expires_in = int(token.get("expires_in", 3600))
+        token["expires_at"] = int(time.time()) + max(0, expires_in - 60)
+
+        _LOGGER.debug(
+            "Token exchange success: token_keys=%s expires_in=%s expires_at=%s access_token=%s refresh_token=%s",
+            list(token.keys()),
+            expires_in,
+            token.get("expires_at"),
+            _mask(token.get("access_token"), keep=6),
+            _mask(token.get("refresh_token"), keep=6),
+        )
+
+        entry_id = getattr(self, "_reauth_entry_id", None)
+        if entry_id:
+            entry = self.hass.config_entries.async_get_entry(entry_id)
+            if entry:
+                _LOGGER.debug("Reauth: updating entry_id=%s and reloading", entry_id)
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data_updates={
+                        "client_id": self._client_id,
+                        "client_secret": self._client_secret,
+                        "token": token,
+                    },
+                )
+
+        _LOGGER.debug("Creating new config entry for %s", DOMAIN)
+        return self.async_create_entry(
+            title="Nuki Events",
+            data={
+                "client_id": self._client_id,
+                "client_secret": self._client_secret,
+                "token": token,
+            },
+        )
+
+    async def async_step_reauth(self, user_input=None):
+        self._log_context("async_step_reauth(start)")
+        self._reauth_entry_id = self.context.get("entry_id")
+        _LOGGER.debug("Reauth requested for entry_id=%s", self._reauth_entry_id)
+        return await self.async_step_user(user_input)
