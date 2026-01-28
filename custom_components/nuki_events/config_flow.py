@@ -30,15 +30,13 @@ def _safe_url(url: str) -> str:
         parts = urllib.parse.urlsplit(url)
         qs = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
 
-        # Always mask these
         if "code" in qs:
             qs["code"] = ["<masked>"]
         if "client_secret" in qs:
             qs["client_secret"] = ["<masked>"]
 
-        # Flatten query (keep first value)
         flat = {k: v[0] if v else "" for k, v in qs.items()}
-        new_query = urllib.parse.urlencode(flat)
+        new_query = urllib.parse.urlencode(flat, quote_via=urllib.parse.quote)
 
         return urllib.parse.urlunsplit(
             (parts.scheme, parts.netloc, parts.path, new_query, parts.fragment)
@@ -48,7 +46,11 @@ def _safe_url(url: str) -> str:
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Config flow for Nuki Events with custom OAuth2 token exchange."""
+    """Config flow for Nuki Events with custom OAuth2 token exchange.
+
+    Uses state=self.flow_id so HA can resume the external step.
+    Encodes query using %20 for spaces (quote_via=urllib.parse.quote).
+    """
 
     VERSION = 1
 
@@ -104,10 +106,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         redirect_uri = f"{external_url.rstrip('/')}/auth/external/callback"
 
-        # IMPORTANT:
-        # For async_external_step, Home Assistant needs to be able to route the callback
-        # back to this flow. It uses the 'state' parameter to do this.
-        # Therefore state MUST be the flow_id (or include it in a way HA understands).
+        # IMPORTANT: HA uses state to route the callback back to this flow.
         state = self.flow_id
 
         self.context["oauth_created_at"] = int(time.time())
@@ -123,11 +122,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             "response_type": "code",
             "client_id": self._client_id,
             "redirect_uri": redirect_uri,
-            "scope": DEFAULT_SCOPES,
+            "scope": DEFAULT_SCOPES,  # space-delimited; will become %20 with quote_via=quote
             "state": state,
         }
 
-        auth_url = f"{OAUTH2_AUTHORIZE}?{urllib.parse.urlencode(params)}"
+        # Force %20 encoding for spaces (instead of '+')
+        query = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+        auth_url = f"{OAUTH2_AUTHORIZE}?{query}"
+
         _LOGGER.debug("Starting external auth step, auth_url=%s", _safe_url(auth_url))
 
         self._log_context("async_step_user(end->external_step)")
@@ -158,8 +160,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             return self.async_abort(reason="oauth_error")
 
-        # At this point HA already routed the callback to the correct flow.
-        # Still log a sanity check:
+        # Sanity check (HA already routed by state)
         if returned_state != self.flow_id:
             _LOGGER.error(
                 "Unexpected state mismatch after routing. returned_state=%s flow_id=%s",
