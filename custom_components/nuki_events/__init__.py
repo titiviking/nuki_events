@@ -56,33 +56,50 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "oauth_session": oauth_session,
     }
 
-    base = get_url(hass, prefer_external=True)
-    webhook_url = f"{base}{WEBHOOK_PATH}/{entry.entry_id}"
-    _LOGGER.debug("Computed external webhook URL for Nuki: %s", webhook_url)
-
-    try:
-        resp = await api.register_decentral_webhook(
-            webhook_url=webhook_url, features=DEFAULT_WEBHOOK_FEATURES
-        )
-        webhook_id = resp.get("id")
-        secret = resp.get("secret")
-        _LOGGER.info(
-            "Registered Nuki decentral webhook (entry=%s, id=%s)",
+    existing_webhook_id = entry.data.get(CONF_WEBHOOK_ID)
+    existing_secret = entry.data.get(CONF_WEBHOOK_SECRET)
+    if existing_webhook_id and existing_secret:
+        _LOGGER.debug(
+            "Using existing Nuki webhook configuration (entry=%s, id=%s)",
             entry.entry_id,
-            webhook_id,
+            existing_webhook_id,
         )
+    else:
+        try:
+            base = get_url(hass, prefer_external=True)
+        except Exception as err:
+            _LOGGER.error(
+                "Cannot compute external URL for Nuki webhook registration (entry=%s): %s",
+                entry.entry_id,
+                err,
+            )
+        else:
+            webhook_url = f"{base}{WEBHOOK_PATH}/{entry.entry_id}"
+            _LOGGER.debug("Computed external webhook URL for Nuki: %s", webhook_url)
 
-        new_data = dict(entry.data)
-        if webhook_id is not None:
-            new_data[CONF_WEBHOOK_ID] = int(webhook_id)
-            hass.data[DOMAIN][entry.entry_id]["webhook_id"] = int(webhook_id)
-        if secret:
-            new_data[CONF_WEBHOOK_SECRET] = secret
-            hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = secret
+            try:
+                resp = await api.register_decentral_webhook(
+                    webhook_url=webhook_url, features=DEFAULT_WEBHOOK_FEATURES
+                )
+                webhook_id = resp.get("id")
+                secret = resp.get("secret")
+                _LOGGER.info(
+                    "Registered Nuki decentral webhook (entry=%s, id=%s)",
+                    entry.entry_id,
+                    webhook_id,
+                )
 
-        hass.config_entries.async_update_entry(entry, data=new_data)
-    except Exception as err:
-        _LOGGER.error("Failed to register Nuki decentral webhook: %s", err)
+                new_data = dict(entry.data)
+                if webhook_id is not None:
+                    new_data[CONF_WEBHOOK_ID] = int(webhook_id)
+                    hass.data[DOMAIN][entry.entry_id]["webhook_id"] = int(webhook_id)
+                if secret:
+                    new_data[CONF_WEBHOOK_SECRET] = secret
+                    hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = secret
+
+                hass.config_entries.async_update_entry(entry, data=new_data)
+            except Exception as err:
+                _LOGGER.error("Failed to register Nuki decentral webhook: %s", err)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
