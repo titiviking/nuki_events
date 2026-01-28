@@ -24,7 +24,7 @@ DEFAULT_WEBHOOK_FEATURES = [
 
 DEFAULT_SCOPES = (
     "account smartlock smartlock.readOnly smartlock.log smartlock.auth "
-    "webhook.decentral offline_access"
+    "webhook.write webhook.decentral offline_access"
 )
 
 EVENT_NUKI_WEBHOOK = f"{DOMAIN}_webhook"
