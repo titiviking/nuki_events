@@ -48,8 +48,9 @@ def _safe_url(url: str) -> str:
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Config flow for Nuki Events with custom OAuth2 token exchange.
 
-    Uses state=self.flow_id so HA can resume the external step.
-    Encodes query using %20 for spaces (quote_via=urllib.parse.quote).
+    - Uses state=self.flow_id so HA can resume the external step.
+    - Encodes query using %20 for spaces (quote_via=urllib.parse.quote).
+    - Persists credentials in flow context so resume after redirect is robust.
     """
 
     VERSION = 1
@@ -80,13 +81,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ),
             )
 
-        self._client_id = (user_input.get("client_id") or "").strip()
-        self._client_secret = (user_input.get("client_secret") or "").strip()
+        client_id = (user_input.get("client_id") or "").strip()
+        client_secret = (user_input.get("client_secret") or "").strip()
+
+        # Persist in context so they survive the external redirect resume
+        self.context["client_id"] = client_id
+        self.context["client_secret"] = client_secret
 
         _LOGGER.debug(
             "User submitted credentials client_id=%s client_secret=%s",
-            _mask(self._client_id),
-            _mask(self._client_secret),
+            _mask(client_id),
+            _mask(client_secret),
         )
 
         external_url = self.hass.config.external_url
@@ -120,9 +125,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         params = {
             "response_type": "code",
-            "client_id": self._client_id,
+            "client_id": client_id,
             "redirect_uri": redirect_uri,
-            "scope": DEFAULT_SCOPES,  # space-delimited; will become %20 with quote_via=quote
+            # space-delimited; will become %20 with quote_via=quote
+            "scope": DEFAULT_SCOPES,
             "state": state,
         }
 
@@ -173,6 +179,18 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.error("No authorization code received in callback.")
             return self.async_abort(reason="invalid_state")
 
+        # Pull credentials from context (robust across external redirect resume)
+        client_id = self.context.get("client_id")
+        client_secret = self.context.get("client_secret")
+        if not client_id or not client_secret:
+            _LOGGER.error(
+                "Missing client credentials in flow context after redirect. "
+                "client_id_present=%s client_secret_present=%s",
+                bool(client_id),
+                bool(client_secret),
+            )
+            return self.async_abort(reason="missing_credentials")
+
         session = async_get_clientsession(self.hass)
 
         redirect_uri = self.context.get("oauth_redirect_uri")
@@ -182,8 +200,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         payload = {
             "grant_type": "authorization_code",
-            "client_id": self._client_id,
-            "client_secret": self._client_secret,
+            "client_id": client_id,
+            "client_secret": client_secret,
             "code": returned_code,
             "redirect_uri": redirect_uri,
         }
@@ -192,7 +210,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             "Exchanging code for token at %s with redirect_uri=%s client_id=%s code=%s",
             OAUTH2_TOKEN,
             redirect_uri,
-            _mask(self._client_id),
+            _mask(client_id),
             _mask(returned_code, keep=6),
         )
 
@@ -236,8 +254,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_update_reload_and_abort(
                     entry,
                     data_updates={
-                        "client_id": self._client_id,
-                        "client_secret": self._client_secret,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
                         "token": token,
                     },
                 )
@@ -246,8 +264,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_create_entry(
             title="Nuki Events",
             data={
-                "client_id": self._client_id,
-                "client_secret": self._client_secret,
+                "client_id": client_id,
+                "client_secret": client_secret,
                 "token": token,
             },
         )
