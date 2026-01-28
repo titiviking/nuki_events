@@ -98,7 +98,7 @@ async def async_get_auth_implementation(
         authorize_url=OAUTH2_AUTHORIZE,
         token_url=OAUTH2_TOKEN,
         client_secret=credential.client_secret,
-        scope=DEFAULT_SCOPES,
+        scopes=DEFAULT_SCOPES,
     )
 
 
