@@ -22,10 +22,16 @@ DEFAULT_WEBHOOK_FEATURES = [
     WEBHOOK_FEATURE_DEVICE_AUTHS,
 ]
 
-DEFAULT_SCOPES = (
-    "account smartlock smartlock.readOnly smartlock.log smartlock.auth "
-    "webhook.write webhook.decentral offline_access"
-)
+DEFAULT_SCOPES = [
+    "account",
+    "smartlock",
+    "smartlock.readOnly",
+    "smartlock.log",
+    "smartlock.auth",
+    "webhook.write",
+    "webhook.decentral",
+    "offline_access",
+]
 
 EVENT_NUKI_WEBHOOK = f"{DOMAIN}_webhook"
 EVENT_NUKI_LOCK_EVENT = f"{DOMAIN}_lock_event"
