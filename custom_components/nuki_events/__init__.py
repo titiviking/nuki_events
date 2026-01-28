@@ -5,6 +5,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.network import get_url
+from homeassistant.helpers import config_entry_oauth2_flow
 
 from .api import NukiApi
 from .coordinator import NukiDataCoordinator
@@ -27,11 +28,23 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
+
+    # Register webhook view once
     if not hass.data[DOMAIN].get("_view_registered"):
         hass.http.register_view(NukiWebhookView(hass))
         hass.data[DOMAIN]["_view_registered"] = True
 
-    api = NukiApi(hass, entry)
+    # --- HA-native OAuth session ---
+    # This is the key alignment: HA handles OAuth state/callback reconciliation,
+    # and this session handles token storage + refresh for the entry.
+    implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
+        hass, entry
+    )
+    oauth_session = config_entry_oauth2_flow.OAuth2Session(hass, entry, implementation)
+
+    # Pass the OAuth session to the API client (so requests always have a valid token).
+    api = NukiApi(hass, entry, oauth_session=oauth_session)
+
     coordinator = NukiDataCoordinator(hass, api)
     await coordinator.async_config_entry_first_refresh()
 
@@ -40,6 +53,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "webhook_secret": entry.data.get(CONF_WEBHOOK_SECRET),
         "webhook_id": entry.data.get(CONF_WEBHOOK_ID),
         "api": api,
+        "oauth_session": oauth_session,
     }
 
     base = get_url(hass, prefer_external=True)
@@ -47,10 +61,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug("Computed external webhook URL for Nuki: %s", webhook_url)
 
     try:
-        resp = await api.register_decentral_webhook(webhook_url=webhook_url, features=DEFAULT_WEBHOOK_FEATURES)
+        resp = await api.register_decentral_webhook(
+            webhook_url=webhook_url, features=DEFAULT_WEBHOOK_FEATURES
+        )
         webhook_id = resp.get("id")
         secret = resp.get("secret")
-        _LOGGER.info("Registered Nuki decentral webhook (entry=%s, id=%s)", entry.entry_id, webhook_id)
+        _LOGGER.info(
+            "Registered Nuki decentral webhook (entry=%s, id=%s)",
+            entry.entry_id,
+            webhook_id,
+        )
 
         new_data = dict(entry.data)
         if webhook_id is not None:
@@ -76,9 +96,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if api and webhook_id:
         try:
             await api.delete_decentral_webhook(int(webhook_id))
-            _LOGGER.info("Deleted Nuki decentral webhook id=%s (entry=%s)", webhook_id, entry.entry_id)
+            _LOGGER.info(
+                "Deleted Nuki decentral webhook id=%s (entry=%s)",
+                webhook_id,
+                entry.entry_id,
+            )
         except Exception as err:
-            _LOGGER.warning("Could not delete Nuki decentral webhook id=%s: %s", webhook_id, err)
+            _LOGGER.warning(
+                "Could not delete Nuki decentral webhook id=%s: %s",
+                webhook_id,
+                err,
+            )
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
