@@ -35,8 +35,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN]["_view_registered"] = True
 
     # --- HA-native OAuth session ---
-    # This is the key alignment: HA handles OAuth state/callback reconciliation,
-    # and this session handles token storage + refresh for the entry.
     implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
         hass, entry
     )
@@ -65,6 +63,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             existing_webhook_id,
         )
     else:
+        # Webhook registration is useful, but should never block the integration
+        # from setting up entities. If registration fails, we log and proceed.
         try:
             base = get_url(hass, prefer_external=True)
         except Exception as err:
@@ -81,25 +81,51 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 resp = await api.register_decentral_webhook(
                     webhook_url=webhook_url, features=DEFAULT_WEBHOOK_FEATURES
                 )
-                webhook_id = resp.get("id")
-                secret = resp.get("secret")
-                _LOGGER.info(
-                    "Registered Nuki decentral webhook (entry=%s, id=%s)",
-                    entry.entry_id,
-                    webhook_id,
-                )
 
-                new_data = dict(entry.data)
-                if webhook_id is not None:
-                    new_data[CONF_WEBHOOK_ID] = int(webhook_id)
-                    hass.data[DOMAIN][entry.entry_id]["webhook_id"] = int(webhook_id)
-                if secret:
-                    new_data[CONF_WEBHOOK_SECRET] = secret
-                    hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = secret
+                if not isinstance(resp, dict):
+                    _LOGGER.error(
+                        "Unexpected response while registering Nuki decentral webhook "
+                        "(expected dict, got %s): %r",
+                        type(resp).__name__,
+                        resp,
+                    )
+                else:
+                    webhook_id = resp.get("id")
+                    secret = resp.get("secret")
+                    _LOGGER.info(
+                        "Registered Nuki decentral webhook (entry=%s, id=%s)",
+                        entry.entry_id,
+                        webhook_id,
+                    )
 
-                hass.config_entries.async_update_entry(entry, data=new_data)
+                    new_data = dict(entry.data)
+                    if webhook_id is not None:
+                        try:
+                            webhook_id_int = int(webhook_id)
+                        except (TypeError, ValueError):
+                            _LOGGER.error(
+                                "Nuki returned non-integer webhook id %r (entry=%s)",
+                                webhook_id,
+                                entry.entry_id,
+                            )
+                        else:
+                            new_data[CONF_WEBHOOK_ID] = webhook_id_int
+                            hass.data[DOMAIN][entry.entry_id]["webhook_id"] = webhook_id_int
+
+                    if secret:
+                        new_data[CONF_WEBHOOK_SECRET] = secret
+                        hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = secret
+
+                    if new_data != entry.data:
+                        hass.config_entries.async_update_entry(entry, data=new_data)
+
             except Exception as err:
-                _LOGGER.error("Failed to register Nuki decentral webhook: %s", err)
+                _LOGGER.error(
+                    "Failed to register Nuki decentral webhook (entry=%s): %s",
+                    entry.entry_id,
+                    err,
+                    exc_info=True,
+                )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
