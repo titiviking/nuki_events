@@ -100,5 +100,5 @@ async def async_get_config_entry_implementation(
         client_secret=None,     # filled by HA when using application_credentials
         authorize_url=OAUTH2_AUTHORIZE,
         token_url=OAUTH2_TOKEN,
-        scope=DEFAULT_SCOPES,
+        scopes=DEFAULT_SCOPES,
     )
