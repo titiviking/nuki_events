@@ -1,3 +1,9 @@
+"""Application Credentials platform for Nuki Events.
+
+This provides the OAuth2 implementation used by Home Assistant's
+application_credentials integration.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -18,6 +24,16 @@ _LOGGER = logging.getLogger(__name__)
 
 class NukiOAuth2Implementation(config_entry_oauth2_flow.LocalOAuth2Implementation):
     """OAuth2 implementation for Nuki using client_secret_post for token requests."""
+
+    @property
+    def extra_authorize_data(self) -> dict[str, str]:
+        """Extra parameters added to the authorize URL.
+
+        Home Assistant's LocalOAuth2Implementation no longer accepts a
+        ``scopes=...`` kwarg. Nuki expects the requested scopes via the
+        ``scope`` query parameter on the authorize endpoint.
+        """
+        return {"scope": " ".join(DEFAULT_SCOPES)}
 
     async def async_exchange_code(self, code: str) -> dict[str, Any]:
         """Exchange authorization code for token using client_secret_post."""
@@ -89,16 +105,13 @@ async def async_get_auth_implementation(
     credential: ClientCredential,
 ) -> config_entry_oauth2_flow.AbstractOAuth2Implementation:
     """Return the auth implementation for Nuki (client_secret_post)."""
-    # AbstractOAuth2FlowHandler will request scopes via its own mechanism; we keep DEFAULT_SCOPES
-    # on the implementation so the session knows what it requested.
     return NukiOAuth2Implementation(
         hass=hass,
         domain=auth_domain,
         client_id=credential.client_id,
+        client_secret=credential.client_secret,
         authorize_url=OAUTH2_AUTHORIZE,
         token_url=OAUTH2_TOKEN,
-        client_secret=credential.client_secret,
-        scopes=DEFAULT_SCOPES,
     )
 
 
