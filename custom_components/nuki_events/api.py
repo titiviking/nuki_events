@@ -33,24 +33,20 @@ class NukiApi:
         self.request_timeout = request_timeout
 
     async def _auth_headers(self) -> dict[str, str]:
-        """Return Authorization header using HA OAuth2Session.
+    token = await self.oauth_session.async_ensure_token_valid()
 
-        IMPORTANT: If token is missing/invalid, raise ConfigEntryAuthFailed so HA
-        can trigger reauth instead of crashing the coordinator.
-        """
-        token: dict[str, Any] | None = await self.oauth_session.async_ensure_token_valid()
+    # async_ensure_token_valid() can return None if token storage is missing/invalid
+    if not token or not isinstance(token, dict):
+        raise ConfigEntryAuthFailed("Missing OAuth token (reauth required)")
 
-        if not token:
-            raise ConfigEntryAuthFailed("Missing OAuth token (reauth required)")
+    access_token = token.get("access_token")
+    if not access_token:
+        raise ConfigEntryAuthFailed("OAuth token missing access_token (reauth required)")
 
-        access_token = token.get("access_token")
-        if not access_token:
-            raise ConfigEntryAuthFailed("OAuth token missing access_token (reauth required)")
-
-        return {
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/json",
-        }
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    }
 
     async def _request(
         self,
