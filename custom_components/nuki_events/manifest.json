@@ -4,8 +4,20 @@
   "version": "1.3.0-final",
   "documentation": "https://api.nuki.io/",
   "config_flow": true,
+  "oauth2": {
+    "authorization_url": "https://api.nuki.io/oauth/authorize",
+    "token_url": "https://api.nuki.io/oauth/token",
+    "scopes": [
+      "account",
+      "notification",
+      "smartlock.readOnly",
+      "smartlock.log",
+      "smartlock.auth",
+      "webhook.decentral"
+    ]
+  },
   "iot_class": "cloud_push",
   "integration_type": "device",
-  "dependencies": ["application_credentials", "auth"],
+  "dependencies": ["application_credentials"],
   "requirements": []
 }
