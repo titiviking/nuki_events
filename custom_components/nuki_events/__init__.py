@@ -1,74 +1,131 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers import config_entry_oauth2_flow
+from homeassistant.helpers.network import get_url
 
-from .const import API_BASE
+from .api import NukiApi
+from .coordinator import NukiDataCoordinator
+from .const import (
+    DOMAIN,
+    PLATFORMS,
+    WEBHOOK_PATH,
+    DEFAULT_WEBHOOK_FEATURES,
+    CONF_WEBHOOK_ID,
+    CONF_WEBHOOK_SECRET,
+)
+from .webhook import NukiWebhookView
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class NukiApi:
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, oauth_session: Any) -> None:
-        self.hass = hass
-        self.entry = entry
-        self.oauth_session = oauth_session
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Set up the integration via YAML (not used, but required by HA loader)."""
+    return True
 
-    async def _auth_headers(self) -> dict[str, str]:
-        token = await self.oauth_session.async_ensure_token_valid()
 
-        # FIX: token may be None
-        if not token or not isinstance(token, dict):
-            raise ConfigEntryAuthFailed("Missing OAuth token (reauth required)")
+def _ensure_expires_at(entry: ConfigEntry) -> dict[str, Any] | None:
+    """Ensure stored OAuth token has expires_at (HA requires it)."""
+    token: dict[str, Any] = dict(entry.data.get("token") or {})
+    if not token:
+        return None
 
-        access_token = token.get("access_token")
-        if not access_token:
-            raise ConfigEntryAuthFailed("OAuth token missing access_token (reauth required)")
+    if "expires_at" in token:
+        return None
 
-        return {
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/json",
-        }
+    expires_in = token.get("expires_in")
+    if expires_in is None:
+        return None
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        session = async_get_clientsession(self.hass)
-        url = f"{API_BASE}{path}"
+    try:
+        expires_in_int = int(expires_in)
+    except (TypeError, ValueError):
+        return None
 
-        headers = kwargs.pop("headers", {})
-        headers.update(await self._auth_headers())
+    token["expires_at"] = time.time() + expires_in_int - 60
+    return token
 
-        async with session.request(method, url, headers=headers, **kwargs) as resp:
-            # FIX: 401/403 should become ConfigEntryAuthFailed (reauth)
-            if resp.status in (401, 403):
-                body = await resp.text()
-                _LOGGER.warning(
-                    "Nuki API auth failed (HTTP %s) for %s %s. Body: %s",
-                    resp.status,
-                    method,
-                    path,
-                    body,
-                )
-                raise ConfigEntryAuthFailed(f"Nuki API auth failed (HTTP {resp.status})")
 
-            resp.raise_for_status()
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up the integration from a config entry."""
+    hass.data.setdefault(DOMAIN, {})
 
-            if resp.content_type == "application/json":
-                return await resp.json()
+    # Register webhook view once
+    if not hass.data[DOMAIN].get("_view_registered"):
+        hass.http.register_view(NukiWebhookView(hass))
+        hass.data[DOMAIN]["_view_registered"] = True
 
-            text = await resp.text()
-            return text if text else None
+    # Create HA OAuth session
+    implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
+        hass, entry
+    )
+    oauth_session = config_entry_oauth2_flow.OAuth2Session(hass, entry, implementation)
 
-    async def list_smartlocks(self) -> Any:
-        return await self._request("GET", "/smartlock")
+    # FIX: prevent KeyError 'expires_at'
+    new_token = _ensure_expires_at(entry)
+    if new_token is not None:
+        new_data = dict(entry.data)
+        new_data["token"] = new_token
+        hass.config_entries.async_update_entry(entry, data=new_data)
 
-    async def register_decentral_webhook(self, webhook_url: str, features: list[str]) -> Any:
-        payload = {"url": webhook_url, "features": features}
-        return await self._request("POST", "/webhook/decentral", json=payload)
+    api = NukiApi(hass, entry, oauth_session=oauth_session)
 
-    async def delete_decentral_webhook(self, webhook_id: int) -> Any:
-        return await self._request("DELETE", f"/webhook/decentral/{int(webhook_id)}")
+    coordinator = NukiDataCoordinator(hass, api)
+    await coordinator.async_config_entry_first_refresh()
+
+    hass.data[DOMAIN][entry.entry_id] = {
+        "coordinator": coordinator,
+        "webhook_secret": entry.data.get(CONF_WEBHOOK_SECRET),
+        "webhook_id": entry.data.get(CONF_WEBHOOK_ID),
+        "api": api,
+        "oauth_session": oauth_session,
+    }
+
+    # Best-effort webhook registration (do not block entity setup)
+    existing_webhook_id = entry.data.get(CONF_WEBHOOK_ID)
+    existing_secret = entry.data.get(CONF_WEBHOOK_SECRET)
+
+    if not (existing_webhook_id and existing_secret):
+        try:
+            base = get_url(hass, prefer_external=True)
+            webhook_url = f"{base}{WEBHOOK_PATH}/{entry.entry_id}"
+
+            resp = await api.register_decentral_webhook(
+                webhook_url=webhook_url, features=DEFAULT_WEBHOOK_FEATURES
+            )
+
+            # FIX: resp can be None/non-dict
+            if isinstance(resp, dict):
+                webhook_id = resp.get("id")
+                secret = resp.get("secret")
+
+                new_data = dict(entry.data)
+                if webhook_id is not None:
+                    new_data[CONF_WEBHOOK_ID] = int(webhook_id)
+                    hass.data[DOMAIN][entry.entry_id]["webhook_id"] = int(webhook_id)
+                if secret:
+                    new_data[CONF_WEBHOOK_SECRET] = secret
+                    hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = secret
+
+                hass.config_entries.async_update_entry(entry, data=new_data)
+            else:
+                _LOGGER.error("Webhook registration returned unexpected response: %r", resp)
+
+        except Exception as err:
+            _LOGGER.error("Failed to register Nuki decentral webhook: %s", err)
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    return unload_ok
