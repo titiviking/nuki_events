@@ -18,6 +18,6 @@
   },
   "iot_class": "cloud_push",
   "integration_type": "device",
-  "dependencies": ["application_credentials"],
+  "dependencies": ["application_credentials", "auth"],
   "requirements": []
 }
