@@ -1,18 +1,9 @@
-"""Application Credentials platform for Nuki Events.
-
-This provides the OAuth2 implementation used by Home Assistant's
-application_credentials integration.
-"""
-
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from homeassistant.components.application_credentials import (
-    AuthorizationServer,
-    ClientCredential,
-)
+from homeassistant.components.application_credentials import AuthorizationServer, ClientCredential
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -27,18 +18,13 @@ class NukiOAuth2Implementation(config_entry_oauth2_flow.LocalOAuth2Implementatio
 
     @property
     def extra_authorize_data(self) -> dict[str, str]:
-        """Extra parameters added to the authorize URL.
-
-        Home Assistant's LocalOAuth2Implementation no longer accepts a
-        ``scopes=...`` kwarg. Nuki expects the requested scopes via the
-        ``scope`` query parameter on the authorize endpoint.
-        """
+        # HA will append these to the authorize URL.
+        # Nuki expects scopes as a space-separated string.
         return {"scope": " ".join(DEFAULT_SCOPES)}
 
     async def async_exchange_code(self, code: str) -> dict[str, Any]:
         """Exchange authorization code for token using client_secret_post."""
         session = async_get_clientsession(self.hass)
-
         data = {
             "grant_type": "authorization_code",
             "code": code,
@@ -48,7 +34,6 @@ class NukiOAuth2Implementation(config_entry_oauth2_flow.LocalOAuth2Implementatio
         }
 
         _LOGGER.debug("Exchanging code for token via POST body at %s", self.token_url)
-
         async with session.post(
             self.token_url,
             data=data,
@@ -68,7 +53,6 @@ class NukiOAuth2Implementation(config_entry_oauth2_flow.LocalOAuth2Implementatio
             raise config_entry_oauth2_flow.OAuth2RequestException("Missing refresh_token")
 
         session = async_get_clientsession(self.hass)
-
         data = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
@@ -77,7 +61,6 @@ class NukiOAuth2Implementation(config_entry_oauth2_flow.LocalOAuth2Implementatio
         }
 
         _LOGGER.debug("Refreshing token via POST body at %s", self.token_url)
-
         async with session.post(
             self.token_url,
             data=data,
@@ -109,14 +92,12 @@ async def async_get_auth_implementation(
         hass=hass,
         domain=auth_domain,
         client_id=credential.client_id,
-        client_secret=credential.client_secret,
         authorize_url=OAUTH2_AUTHORIZE,
         token_url=OAUTH2_TOKEN,
+        client_secret=credential.client_secret,
     )
 
 
 async def async_get_description_placeholders(hass: HomeAssistant) -> dict[str, str]:
     """Placeholders shown in the Application Credentials UI (optional)."""
-    return {
-        "docs_url": "https://api.nuki.io/",
-    }
+    return {"docs_url": "https://api.nuki.io/"}
