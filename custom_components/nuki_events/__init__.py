@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -19,11 +21,38 @@ from .const import (
 )
 from .webhook import NukiWebhookView
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = logging.getLogger("custom_components.nuki_events")
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
+
+
+def _ensure_expires_at(entry: ConfigEntry) -> dict[str, Any] | None:
+    """Ensure OAuth token has expires_at (HA requires it).
+
+    Some token stores only persist expires_in. Home Assistant's OAuth2Session
+    expects expires_at to be present and will raise KeyError otherwise.
+    """
+    token: dict[str, Any] = dict(entry.data.get("token") or {})
+    if not token:
+        return None
+
+    if "expires_at" in token:
+        return None
+
+    expires_in = token.get("expires_in")
+    if expires_in is None:
+        return None
+
+    try:
+        expires_in_int = int(expires_in)
+    except (TypeError, ValueError):
+        return None
+
+    # now + expires_in minus a small safety margin
+    token["expires_at"] = time.time() + expires_in_int - 60
+    return token
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -40,7 +69,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     oauth_session = config_entry_oauth2_flow.OAuth2Session(hass, entry, implementation)
 
-    # Pass the OAuth session to the API client (so requests always have a valid token).
+    # Fix KeyError: 'expires_at' by normalizing stored token
+    new_token = _ensure_expires_at(entry)
+    if new_token is not None:
+        _LOGGER.debug(
+            "OAuth token missing expires_at; normalizing and updating config entry (entry_id=%s)",
+            entry.entry_id,
+        )
+        new_data = dict(entry.data)
+        new_data["token"] = new_token
+        hass.config_entries.async_update_entry(entry, data=new_data)
+
+    # API client using HA-managed OAuth session
     api = NukiApi(hass, entry, oauth_session=oauth_session)
 
     coordinator = NukiDataCoordinator(hass, api)
@@ -54,8 +94,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "oauth_session": oauth_session,
     }
 
+    # Webhook registration (best-effort; do not block entity setup)
     existing_webhook_id = entry.data.get(CONF_WEBHOOK_ID)
     existing_secret = entry.data.get(CONF_WEBHOOK_SECRET)
+
     if existing_webhook_id and existing_secret:
         _LOGGER.debug(
             "Using existing Nuki webhook configuration (entry=%s, id=%s)",
@@ -63,35 +105,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             existing_webhook_id,
         )
     else:
-        # Webhook registration is useful, but should never block the integration
-        # from setting up entities. If registration fails, we log and proceed.
         try:
             base = get_url(hass, prefer_external=True)
-        except Exception as err:
-            _LOGGER.error(
-                "Cannot compute external URL for Nuki webhook registration (entry=%s): %s",
+        except Exception:
+            _LOGGER.exception(
+                "Cannot compute external URL for Nuki webhook registration (entry=%s)",
                 entry.entry_id,
-                err,
             )
         else:
             webhook_url = f"{base}{WEBHOOK_PATH}/{entry.entry_id}"
             _LOGGER.debug("Computed external webhook URL for Nuki: %s", webhook_url)
 
             try:
-                resp = await api.register_decentral_webhook(
+                resp: Any = await api.register_decentral_webhook(
                     webhook_url=webhook_url, features=DEFAULT_WEBHOOK_FEATURES
                 )
 
                 if not isinstance(resp, dict):
                     _LOGGER.error(
-                        "Unexpected response while registering Nuki decentral webhook "
-                        "(expected dict, got %s): %r",
+                        "Webhook registration returned non-dict response (type=%s): %r",
                         type(resp).__name__,
                         resp,
                     )
                 else:
                     webhook_id = resp.get("id")
                     secret = resp.get("secret")
+
                     _LOGGER.info(
                         "Registered Nuki decentral webhook (entry=%s, id=%s)",
                         entry.entry_id,
@@ -100,31 +139,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                     new_data = dict(entry.data)
                     if webhook_id is not None:
-                        try:
-                            webhook_id_int = int(webhook_id)
-                        except (TypeError, ValueError):
-                            _LOGGER.error(
-                                "Nuki returned non-integer webhook id %r (entry=%s)",
-                                webhook_id,
-                                entry.entry_id,
-                            )
-                        else:
-                            new_data[CONF_WEBHOOK_ID] = webhook_id_int
-                            hass.data[DOMAIN][entry.entry_id]["webhook_id"] = webhook_id_int
-
+                        new_data[CONF_WEBHOOK_ID] = int(webhook_id)
+                        hass.data[DOMAIN][entry.entry_id]["webhook_id"] = int(webhook_id)
                     if secret:
                         new_data[CONF_WEBHOOK_SECRET] = secret
                         hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = secret
 
-                    if new_data != entry.data:
-                        hass.config_entries.async_update_entry(entry, data=new_data)
+                    hass.config_entries.async_update_entry(entry, data=new_data)
 
-            except Exception as err:
-                _LOGGER.error(
-                    "Failed to register Nuki decentral webhook (entry=%s): %s",
+            except Exception:
+                _LOGGER.exception(
+                    "Failed to register Nuki decentral webhook (entry=%s)",
                     entry.entry_id,
-                    err,
-                    exc_info=True,
                 )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -144,11 +170,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 webhook_id,
                 entry.entry_id,
             )
-        except Exception as err:
-            _LOGGER.warning(
-                "Could not delete Nuki decentral webhook id=%s: %s",
+        except Exception:
+            _LOGGER.exception(
+                "Could not delete Nuki decentral webhook id=%s (entry=%s)",
                 webhook_id,
-                err,
+                entry.entry_id,
             )
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
