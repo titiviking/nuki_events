@@ -1,35 +1,55 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from aiohttp import ClientResponseError
-
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers import config_entry_oauth2_flow
 
 from .const import API_BASE
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = logging.getLogger("custom_components.nuki_events.api")
 
 
-@dataclass
 class NukiApi:
-    hass: HomeAssistant
-    entry: Any  # ConfigEntry, but keep loose to avoid circular typing issues
-    oauth_session: config_entry_oauth2_flow.OAuth2Session
+    """Thin Nuki Web API client using HA-managed OAuth2Session."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        oauth_session: Any,
+        api_base: str | None = None,
+        request_timeout: int = 30,
+    ) -> None:
+        self.hass = hass
+        self.entry = entry
+        self.oauth_session = oauth_session
+        self.api_base = (api_base or API_BASE).rstrip("/")
+        self.request_timeout = request_timeout
 
     async def _auth_headers(self) -> dict[str, str]:
-        """Ensure token is valid and return Authorization header."""
-        token = await self.oauth_session.async_ensure_token_valid()
+        """Return Authorization header using HA OAuth2Session.
+
+        IMPORTANT: If token is missing/invalid, raise ConfigEntryAuthFailed so HA
+        can trigger reauth instead of crashing the coordinator.
+        """
+        token: dict[str, Any] | None = await self.oauth_session.async_ensure_token_valid()
+
+        if not token:
+            raise ConfigEntryAuthFailed("Missing OAuth token (reauth required)")
+
         access_token = token.get("access_token")
         if not access_token:
-            raise config_entry_oauth2_flow.OAuth2RequestException("Missing access_token in OAuth token")
+            raise ConfigEntryAuthFailed("OAuth token missing access_token (reauth required)")
+
         return {
-            "accept": "application/json",
-            "authorization": f"Bearer {access_token}",
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
         }
 
     async def _request(
@@ -37,57 +57,88 @@ class NukiApi:
         method: str,
         path: str,
         *,
-        json: dict | None = None,
-        params: Mapping[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+        json: Any | None = None,
     ) -> Any:
+        """Make an authenticated request to Nuki API.
+
+        - Raises ConfigEntryAuthFailed on 401/403 so HA flags reauth.
+        - Raises for other HTTP errors (caller/coordinator will turn into UpdateFailed).
+        """
         session = async_get_clientsession(self.hass)
+        url = f"{self.api_base}{path}"
+
         headers = await self._auth_headers()
-        url = f"{API_BASE}{path}"
 
-        _LOGGER.debug("Nuki API request: %s %s params=%s json=%s", method, url, params, json)
-        async with session.request(method, url, headers=headers, json=json, params=params) as resp:
-            _LOGGER.debug(
-                "Nuki API response: %s %s -> status=%s content_type=%s",
+        try:
+            async with asyncio.timeout(self.request_timeout):
+                async with session.request(
+                    method,
+                    url,
+                    headers=headers,
+                    params=params,
+                    json=json,
+                ) as resp:
+                    if resp.status in (401, 403):
+                        body = await resp.text()
+                        _LOGGER.warning(
+                            "Nuki API auth failed (HTTP %s) for %s %s. Body: %s",
+                            resp.status,
+                            method,
+                            path,
+                            body,
+                        )
+                        raise ConfigEntryAuthFailed(f"Nuki API auth failed (HTTP {resp.status})")
+
+                    resp.raise_for_status()
+
+                    # Some endpoints might return empty bodies
+                    content_type = resp.headers.get("Content-Type", "")
+                    if "application/json" in content_type.lower():
+                        return await resp.json()
+
+                    # Fallback: text (or empty)
+                    text = await resp.text()
+                    return text if text else None
+
+        except ConfigEntryAuthFailed:
+            raise
+        except ClientResponseError as err:
+            _LOGGER.error(
+                "Nuki API HTTP error (%s) for %s %s: %s",
+                getattr(err, "status", "?"),
                 method,
-                url,
-                resp.status,
-                resp.content_type,
+                path,
+                err,
             )
+            raise
+        except TimeoutError:
+            _LOGGER.error("Nuki API timeout for %s %s", method, path)
+            raise
+        except Exception:
+            _LOGGER.exception("Unexpected Nuki API error for %s %s", method, path)
+            raise
 
-            # If auth fails even after ensure_token_valid, force reauth
-            if resp.status in (401, 403):
-                body = await resp.text()
-                _LOGGER.error("Nuki API auth failed (%s): %s", resp.status, body)
-                raise config_entry_oauth2_flow.OAuth2RequestException(
-                    f"Authorization failed ({resp.status}): {body}"
-                )
+    # ---------- Public API used by the integration ----------
 
-            # Raise for other errors
-            try:
-                resp.raise_for_status()
-            except ClientResponseError:
-                body = await resp.text()
-                _LOGGER.error("Nuki API error response (%s): %s", resp.status, body)
-                raise
+    async def list_smartlocks(self) -> list[dict[str, Any]]:
+        data = await self._request("GET", "/smartlock")
+        # Nuki returns JSON list here
+        if data is None:
+            return []
+        if isinstance(data, list):
+            return data
+        # If API ever changes shape, keep integration alive + log
+        _LOGGER.error("Unexpected /smartlock response type=%s value=%r", type(data).__name__, data)
+        return []
 
-            if resp.status == 204:
-                return None
-            if resp.content_type == "application/json":
-                return await resp.json()
-            return await resp.text()
+    async def register_decentral_webhook(self, webhook_url: str, features: list[str] | None = None) -> dict[str, Any] | None:
+        payload: dict[str, Any] = {"url": webhook_url}
+        if features is not None:
+            payload["features"] = features
 
-    async def list_smartlocks(self) -> list[dict]:
-        return await self._request("GET", "/smartlock")  # type: ignore[return-value]
-
-    async def get_all_auths(self) -> list[dict]:
-        return await self._request("GET", "/smartlock/auth")  # type: ignore[return-value]
-
-    async def register_decentral_webhook(self, webhook_url: str, features: list[str]) -> dict:
-        return await self._request(
-            "PUT",
-            "/api/decentralWebhook",
-            json={"webhookUrl": webhook_url, "webhookFeatures": features},
-        )
+        data = await self._request("POST", "/webhook/decentral", json=payload)
+        return data if isinstance(data, dict) else None
 
     async def delete_decentral_webhook(self, webhook_id: int) -> None:
-        await self._request("DELETE", f"/api/decentralWebhook/{webhook_id}")
+        await self._request("DELETE", f"/webhook/decentral/{int(webhook_id)}")
