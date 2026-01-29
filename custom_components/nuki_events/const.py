@@ -29,8 +29,14 @@ DEFAULT_SCOPES = [
     "smartlock.log",
     "smartlock.auth",
     "webhook.decentral",
-
 ]
 
 EVENT_NUKI_WEBHOOK = f"{DOMAIN}_webhook"
 EVENT_NUKI_LOCK_EVENT = f"{DOMAIN}_lock_event"
+
+# Optional: simple feature set for quick checks
+WEBHOOK_FEATURES = {
+    WEBHOOK_FEATURE_DEVICE_STATUS,
+    WEBHOOK_FEATURE_DEVICE_LOGS,
+    WEBHOOK_FEATURE_DEVICE_AUTHS,
+}
