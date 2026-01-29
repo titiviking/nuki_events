@@ -3,101 +3,82 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.components.application_credentials import AuthorizationServer, ClientCredential
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import config_entry_oauth2_flow
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DEFAULT_SCOPES, OAUTH2_AUTHORIZE, OAUTH2_TOKEN
+from .const import API_BASE
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class NukiOAuth2Implementation(config_entry_oauth2_flow.LocalOAuth2Implementation):
-    """OAuth2 implementation for Nuki using client_secret_post for token requests."""
+class NukiApi:
+    """Nuki Web API client using HA OAuth2Session for token management."""
 
-    @property
-    def extra_authorize_data(self) -> dict[str, str]:
-        # HA will append these to the authorize URL.
-        # Nuki expects scopes as a space-separated string.
-        return {"scope": " ".join(DEFAULT_SCOPES)}
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, oauth_session: Any) -> None:
+        self.hass = hass
+        self.entry = entry
+        self.oauth_session = oauth_session
 
-    async def async_exchange_code(self, code: str) -> dict[str, Any]:
-        """Exchange authorization code for token using client_secret_post."""
-        session = async_get_clientsession(self.hass)
-        data = {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": self.redirect_uri,
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
+    async def _auth_headers(self) -> dict[str, str]:
+        """Return Authorization headers.
+
+        Fix 1: async_ensure_token_valid() can return None; never call .get() on None.
+        Raise ConfigEntryAuthFailed so HA can trigger reauth instead of crashing.
+        """
+        token = await self.oauth_session.async_ensure_token_valid()
+
+        if not token or not isinstance(token, dict):
+            raise ConfigEntryAuthFailed("Missing OAuth token (reauth required)")
+
+        access_token = token.get("access_token")
+        if not access_token:
+            raise ConfigEntryAuthFailed("OAuth token missing access_token (reauth required)")
+
+        return {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
         }
 
-        _LOGGER.debug("Exchanging code for token via POST body at %s", self.token_url)
-        async with session.post(
-            self.token_url,
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        ) as resp:
-            body = await resp.text()
-            if resp.status != 200:
-                raise config_entry_oauth2_flow.OAuth2RequestException(
-                    f"Token exchange failed ({resp.status}): {body}"
-                )
-            return await resp.json()
-
-    async def async_refresh_token(self, token: dict[str, Any]) -> dict[str, Any]:
-        """Refresh token using client_secret_post."""
-        refresh_token = token.get("refresh_token")
-        if not refresh_token:
-            raise config_entry_oauth2_flow.OAuth2RequestException("Missing refresh_token")
-
+    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        """Make an authenticated request to Nuki."""
         session = async_get_clientsession(self.hass)
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-        }
+        url = f"{API_BASE}{path}"
 
-        _LOGGER.debug("Refreshing token via POST body at %s", self.token_url)
-        async with session.post(
-            self.token_url,
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        ) as resp:
-            body = await resp.text()
-            if resp.status != 200:
-                raise config_entry_oauth2_flow.OAuth2RequestException(
-                    f"Token refresh failed ({resp.status}): {body}"
+        headers = kwargs.pop("headers", {})
+        headers.update(await self._auth_headers())
+
+        async with session.request(method, url, headers=headers, **kwargs) as resp:
+            # Fix 2: 401/403 should be treated as auth failure -> reauth
+            if resp.status in (401, 403):
+                body = await resp.text()
+                _LOGGER.warning(
+                    "Nuki API auth failed (HTTP %s) for %s %s. Body: %s",
+                    resp.status,
+                    method,
+                    path,
+                    body,
                 )
-            return await resp.json()
+                raise ConfigEntryAuthFailed(f"Nuki API auth failed (HTTP {resp.status})")
 
+            resp.raise_for_status()
 
-async def async_get_authorization_server(hass: HomeAssistant) -> AuthorizationServer:
-    """Return the authorization server for Nuki."""
-    return AuthorizationServer(
-        authorize_url=OAUTH2_AUTHORIZE,
-        token_url=OAUTH2_TOKEN,
-    )
+            if resp.content_type == "application/json":
+                return await resp.json()
 
+            text = await resp.text()
+            return text if text else None
 
-async def async_get_auth_implementation(
-    hass: HomeAssistant,
-    auth_domain: str,
-    credential: ClientCredential,
-) -> config_entry_oauth2_flow.AbstractOAuth2Implementation:
-    """Return the auth implementation for Nuki (client_secret_post)."""
-    return NukiOAuth2Implementation(
-        hass=hass,
-        domain=auth_domain,
-        client_id=credential.client_id,
-        authorize_url=OAUTH2_AUTHORIZE,
-        token_url=OAUTH2_TOKEN,
-        client_secret=credential.client_secret,
-    )
+    async def list_smartlocks(self) -> Any:
+        """Return list of smartlocks."""
+        return await self._request("GET", "/smartlock")
 
+    async def register_decentral_webhook(self, webhook_url: str, features: list[str]) -> Any:
+        """Register a decentral webhook."""
+        payload = {"url": webhook_url, "features": features}
+        return await self._request("POST", "/webhook/decentral", json=payload)
 
-async def async_get_description_placeholders(hass: HomeAssistant) -> dict[str, str]:
-    """Placeholders shown in the Application Credentials UI (optional)."""
-    return {"docs_url": "https://api.nuki.io/"}
+    async def delete_decentral_webhook(self, webhook_id: int) -> Any:
+        """Delete a decentral webhook."""
+        return await self._request("DELETE", f"/webhook/decentral/{int(webhook_id)}")
