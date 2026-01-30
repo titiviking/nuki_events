@@ -61,9 +61,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN]["_view_registered"] = True
 
     # Create HA OAuth session
+    try:
     implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
         hass, entry
     )
+except config_entry_oauth2_flow.ImplementationUnavailableError as err:
+    # Added in HA 2025.12+: treat as retryable when internet is temporarily unavailable
+    from homeassistant.exceptions import ConfigEntryNotReady
+
+    raise ConfigEntryNotReady(
+        "OAuth2 implementation temporarily unavailable, will retry"
+    ) from err
     oauth_session = config_entry_oauth2_flow.OAuth2Session(hass, entry, implementation)
 
     # FIX: prevent KeyError 'expires_at'

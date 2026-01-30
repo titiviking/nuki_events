@@ -5,19 +5,11 @@
     "step": {
       "user": {
         "title": "Connect to Nuki",
-        "description": "Enter your Nuki OAuth client credentials from Nuki Web (Advanced API integration).",
-        "data": {
-          "client_id": "Client ID",
-          "client_secret": "Client Secret"
-        }
+        "description": "You will be redirected to Nuki Web to authorize Home Assistant."
       },
-      "reauth": {
+      "reauth_confirm": {
         "title": "Re-authenticate with Nuki",
-        "description": "Your Nuki token expired or was revoked. Please log in again.",
-        "data": {
-          "client_id": "Client ID",
-          "client_secret": "Client Secret"
-        }
+        "description": "Your Nuki authorization for **{name}** needs to be renewed."
       }
     },
     "error": {
@@ -26,5 +18,8 @@
     "abort": {
       "reauth_successful": "Re-authentication was successful."
     }
+  },
+  "application_credentials": {
+    "description": "In Nuki Web, go to **Menu \u2192 API** and request/enable **Advanced API Integration**. Create an OAuth2 API Key/Secret and add Home Assistant's redirect URL(s). Then enter the credentials below. See {docs_url}."
   }
 }

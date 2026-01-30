@@ -29,6 +29,7 @@ DEFAULT_SCOPES = [
     "smartlock.log",
     "smartlock.auth",
     "webhook.decentral",
+    "offline_access",
 ]
 
 EVENT_NUKI_WEBHOOK = f"{DOMAIN}_webhook"
