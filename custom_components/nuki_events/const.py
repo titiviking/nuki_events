@@ -41,3 +41,56 @@ WEBHOOK_FEATURES = {
     WEBHOOK_FEATURE_DEVICE_LOGS,
     WEBHOOK_FEATURE_DEVICE_AUTHS,
 }
+
+# ---------------------------------------------------------------------
+# Nuki enum translations (from Nuki Web API documentation)
+# ---------------------------------------------------------------------
+
+NUKI_ACTION = {
+    0: "none",
+    1: "unlock",
+    2: "lock",
+    3: "unlatch",
+    4: "lock_n_go",
+    5: "lock_n_go_with_unlatch",
+}
+
+NUKI_TRIGGER = {
+    0: "system",
+    1: "manual",
+    2: "button",
+    3: "automatic",
+    4: "app",
+    5: "auto_lock",
+    6: "keypad",
+    7: "fingerprint",
+}
+
+NUKI_SOURCE = {
+    0: "nuki_app",
+    1: "web",
+    2: "button",
+    3: "bridge",
+    4: "keypad",
+    5: "fingerprint",
+    6: "fob",
+    7: "key",
+}
+
+NUKI_DEVICE_TYPE = {
+    0: "smart_lock",
+    2: "opener",
+    3: "smart_door",
+    4: "smart_lock_3",
+    5: "smart_lock_4",
+}
+
+NUKI_COMPLETION_STATE = {
+    0: "success",
+    1: "motor_blocked",
+    2: "canceled",
+    3: "too_recent",
+    4: "busy",
+    5: "low_battery",
+}
+
