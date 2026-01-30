@@ -11,10 +11,10 @@ from .api import NukiApi
 from .const import (
     DOMAIN,
     NUKI_ACTION,
-    NUKI_TRIGGER,
-    NUKI_SOURCE,
     NUKI_DEVICE_TYPE,
-    NUKI_COMPLETION_STATE,
+    NUKI_SOURCE,
+    NUKI_TRIGGER,
+    NUKI_LOG_STATE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "last_auth_id": {},
             "last_action": {},
             "last_trigger": {},
-            "last_completion_state": {},
+            "last_completion_state": {},  # kept for backwards compatibility: now mapped from log "state"
             "last_source": {},
             "last_device_type": {},
             "last_date": {},
@@ -117,36 +117,26 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self._data["last_auth_id"][sl_id] = auth_id
 
                 if "action" in event:
-                    self._data["last_action"][sl_id] = self._label(
-                        NUKI_ACTION, event["action"]
-                    )
+                    self._data["last_action"][sl_id] = self._label(NUKI_ACTION, event["action"])
 
                 if "trigger" in event:
-                    self._data["last_trigger"][sl_id] = self._label(
-                        NUKI_TRIGGER, event["trigger"]
-                    )
+                    self._data["last_trigger"][sl_id] = self._label(NUKI_TRIGGER, event["trigger"])
 
                 if "source" in event:
-                    self._data["last_source"][sl_id] = self._label(
-                        NUKI_SOURCE, event["source"]
-                    )
+                    self._data["last_source"][sl_id] = self._label(NUKI_SOURCE, event["source"])
 
                 if "deviceType" in event:
-                    self._data["last_device_type"][sl_id] = self._label(
-                        NUKI_DEVICE_TYPE, event["deviceType"]
-                    )
+                    self._data["last_device_type"][sl_id] = self._label(NUKI_DEVICE_TYPE, event["deviceType"])
 
-                if "completionState" in event:
-                    self._data["last_completion_state"][sl_id] = self._label(
-                        NUKI_COMPLETION_STATE, event["completionState"]
-                    )
+                # ✅ FIX: map log "state" (not completionState) into last_completion_state
+                # Nuki DEVICE_LOGS include "state": numeric enum
+                if "state" in event:
+                    self._data["last_completion_state"][sl_id] = self._label(NUKI_LOG_STATE, event["state"])
 
                 if "date" in event:
                     self._data["last_date"][sl_id] = event["date"]
 
-            self._data["event_counter"][sl_id] = (
-                self._data["event_counter"].get(sl_id, 0) + 1
-            )
+            self._data["event_counter"][sl_id] = self._data["event_counter"].get(sl_id, 0) + 1
 
             self.async_set_updated_data(dict(self._data))
             _LOGGER.debug(
