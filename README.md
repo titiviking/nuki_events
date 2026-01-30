@@ -4,6 +4,13 @@ This repository provides a custom Home Assistant integration that listens for **
 
 The integration is webhook-driven (no aggressive polling) and focuses on **who did what, how, and when** on your Nuki devices.
 
+> [!IMPORTANT]
+> This integration is not affiliated with or endorsed by Nuki.
+> It is a completely independent project, backed up by the community, and based on official documentation and APIs.
+
+> [!NOTE]
+> **Disclaimer:** this project has been generated mainly by AI. Even though it has been reviewed and tested by a professional programmer, I feel like it's important to disclose this fact.
+> 
 ---
 
 ## Features
