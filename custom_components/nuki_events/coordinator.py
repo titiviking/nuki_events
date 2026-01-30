@@ -21,7 +21,11 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """Webhook-driven coordinator that stores 'last actor' per smartlock."""
+    """Webhook-driven coordinator that stores 'last actor' per smartlock.
+
+    On startup (first refresh), we also fetch the most recent logs per lock to avoid
+    the sensor staying 'unknown' until the first webhook arrives.
+    """
 
     def __init__(self, hass: HomeAssistant, api: NukiApi) -> None:
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=None)
@@ -33,7 +37,7 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "last_auth_id": {},
             "last_action": {},
             "last_trigger": {},
-            "last_completion_state": {},  # kept for backwards compatibility: now mapped from log "state"
+            "last_completion_state": {},  # mapped from log "state"
             "last_source": {},
             "last_device_type": {},
             "last_date": {},
@@ -48,6 +52,10 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not isinstance(locks, list):
                 locks = []
             self._data["locks"] = locks
+
+            # Prime last-actor info from latest logs so state isn't 'unknown' after restart
+            await self._prime_from_latest_logs(locks)
+
             return dict(self._data)
 
         except ConfigEntryAuthFailed:
@@ -58,6 +66,59 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise UpdateFailed(str(err)) from err
         finally:
             _LOGGER.debug("Coordinator update finished")
+
+    async def _prime_from_latest_logs(self, locks: list[dict[str, Any]]) -> None:
+        """Fetch and apply the most recent log entry for each lock.
+
+        This should be cheap (limit=1), and avoids unknown sensor state after restart.
+        """
+        for lock in locks:
+            # Nuki lock objects vary; support common keys
+            lock_id = lock.get("smartlockId") or lock.get("id")
+            sl_id = self._safe_int(lock_id)
+            if sl_id is None:
+                continue
+
+            try:
+                raw = await self.api.list_smartlock_logs(sl_id, limit=1)
+            except ConfigEntryAuthFailed:
+                # Bubble up: if token is invalid, HA should reauth
+                raise
+            except Exception as err:
+                _LOGGER.debug("Failed to fetch latest log for smartlockId=%s: %s", sl_id, err)
+                continue
+
+            latest = self._extract_latest_log(raw)
+            if not latest:
+                continue
+
+            # Apply as if it were a DEVICE_LOGS webhook event
+            self._apply_log_event(sl_id, latest)
+
+    @staticmethod
+    def _extract_latest_log(raw: Any) -> dict[str, Any] | None:
+        """Normalize possible log response shapes into a single latest log dict."""
+        if raw is None:
+            return None
+
+        # Common case: list of logs
+        if isinstance(raw, list):
+            return raw[0] if raw else None
+
+        # Sometimes wrapped in a dict like {"smartlockLogs": [...]} or {"logs": [...]}
+        if isinstance(raw, dict):
+            for key in ("smartlockLogs", "logs", "smartlockLog", "log"):
+                val = raw.get(key)
+                if isinstance(val, list):
+                    return val[0] if val else None
+                if isinstance(val, dict):
+                    return val
+            # Or the dict itself might already be a log entry
+            # (has at least action/date/authId/etc.)
+            if any(k in raw for k in ("action", "date", "authId", "name", "state")):
+                return raw
+
+        return None
 
     def _normalize_webhook_payload(
         self, payload: dict[str, Any]
@@ -90,6 +151,43 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return "unknown"
         return mapping.get(raw_int, f"unknown({raw_int})")
 
+    def _apply_log_event(self, sl_id: int, event: dict[str, Any]) -> None:
+        """Apply a log event to coordinator state (used by both webhook + priming)."""
+        auth_id = event.get("authId") or event.get("auth_id")
+        name = (
+            event.get("name")
+            or event.get("authName")
+            or event.get("accountUserName")
+            or event.get("userName")
+        )
+        actor = name or (str(auth_id) if auth_id is not None else "unknown")
+
+        self._data["last_actor"][sl_id] = actor
+        if auth_id is not None:
+            self._data["last_auth_id"][sl_id] = auth_id
+
+        if "action" in event:
+            self._data["last_action"][sl_id] = self._label(NUKI_ACTION, event["action"])
+
+        if "trigger" in event:
+            self._data["last_trigger"][sl_id] = self._label(NUKI_TRIGGER, event["trigger"])
+
+        if "source" in event:
+            self._data["last_source"][sl_id] = self._label(NUKI_SOURCE, event["source"])
+
+        if "deviceType" in event:
+            self._data["last_device_type"][sl_id] = self._label(NUKI_DEVICE_TYPE, event["deviceType"])
+
+        # DEVICE_LOGS include "state": completion state enum
+        if "state" in event:
+            self._data["last_completion_state"][sl_id] = self._label(NUKI_LOG_STATE, event["state"])
+
+        if "date" in event:
+            self._data["last_date"][sl_id] = event["date"]
+
+        # Count this as an event to keep dashboards consistent
+        self._data["event_counter"][sl_id] = self._data["event_counter"].get(sl_id, 0) + 1
+
     async def async_handle_webhook(self, entry_id: str, payload: dict[str, Any]) -> None:
         try:
             sl_id, event = self._normalize_webhook_payload(payload)
@@ -101,42 +199,11 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             if feature == "DEVICE_STATUS":
                 self._data["last_device_status"][sl_id] = event
+                # Count status events too (optional but consistent with previous behavior)
+                self._data["event_counter"][sl_id] = self._data["event_counter"].get(sl_id, 0) + 1
 
             if feature == "DEVICE_LOGS":
-                auth_id = event.get("authId") or event.get("auth_id")
-                name = (
-                    event.get("name")
-                    or event.get("authName")
-                    or event.get("accountUserName")
-                    or event.get("userName")
-                )
-                actor = name or (str(auth_id) if auth_id is not None else "unknown")
-
-                self._data["last_actor"][sl_id] = actor
-                if auth_id is not None:
-                    self._data["last_auth_id"][sl_id] = auth_id
-
-                if "action" in event:
-                    self._data["last_action"][sl_id] = self._label(NUKI_ACTION, event["action"])
-
-                if "trigger" in event:
-                    self._data["last_trigger"][sl_id] = self._label(NUKI_TRIGGER, event["trigger"])
-
-                if "source" in event:
-                    self._data["last_source"][sl_id] = self._label(NUKI_SOURCE, event["source"])
-
-                if "deviceType" in event:
-                    self._data["last_device_type"][sl_id] = self._label(NUKI_DEVICE_TYPE, event["deviceType"])
-
-                # ✅ FIX: map log "state" (not completionState) into last_completion_state
-                # Nuki DEVICE_LOGS include "state": numeric enum
-                if "state" in event:
-                    self._data["last_completion_state"][sl_id] = self._label(NUKI_LOG_STATE, event["state"])
-
-                if "date" in event:
-                    self._data["last_date"][sl_id] = event["date"]
-
-            self._data["event_counter"][sl_id] = self._data["event_counter"].get(sl_id, 0) + 1
+                self._apply_log_event(sl_id, event)
 
             self.async_set_updated_data(dict(self._data))
             _LOGGER.debug(
