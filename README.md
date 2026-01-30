@@ -132,4 +132,17 @@ If webhook registration fails, check:
 ### Webhooks arrive but the sensor does not update
 - Only `DEVICE_LOGS` events update the actor/action attributes
 - Check logs for payload normalization warnings
-- Tri
+- Trigger a lock/unlock action to force a new log event
+
+### Unknown enum values
+- Nuki occasionally adds new enum values
+- These will appear as `unknown(<number>)` until mappings are updated
+
+---
+
+## Notes
+
+- This integration is intentionally webhook-driven to minimize API usage
+- `DEVICE_STATUS` payloads are stored internally and may be exposed as attributes in future versions
+
+---
