@@ -6,7 +6,6 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers.config_entry_oauth2_flow import OAuth2Session
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import API_BASE
@@ -15,106 +14,74 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class NukiApi:
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Nuki Web API client using HA OAuth2Session for token management."""
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, oauth_session: Any) -> None:
         self.hass = hass
         self.entry = entry
-        self.session = async_get_clientsession(hass)
-        self.oauth_session = OAuth2Session(hass, entry)
+        self.oauth_session = oauth_session
 
     async def _auth_headers(self) -> dict[str, str]:
-        """Ensure token is valid and return auth headers."""
-        try:
-            await self.oauth_session.async_ensure_token_valid()
-        except Exception as err:
-            raise ConfigEntryAuthFailed("OAuth token invalid") from err
+        """Return Authorization headers.
 
-        token = self.entry.data.get("token")
-        if not token or "access_token" not in token:
+        Fix 1: async_ensure_token_valid() can return None; never call .get() on None.
+        Raise ConfigEntryAuthFailed so HA can trigger reauth instead of crashing.
+        """
+        # HA's OAuth2Session.async_ensure_token_valid() updates the stored token
+        # but does not return it. Use oauth_session.token after ensuring validity.
+        await self.oauth_session.async_ensure_token_valid()
+        token = getattr(self.oauth_session, "token", None)
+
+        if not token or not isinstance(token, dict):
             raise ConfigEntryAuthFailed("Missing OAuth token (reauth required)")
 
+        access_token = token.get("access_token")
+        if not access_token:
+            raise ConfigEntryAuthFailed("OAuth token missing access_token (reauth required)")
+
         return {
-            "Authorization": f"Bearer {token['access_token']}",
+            "Authorization": f"Bearer {access_token}",
             "Accept": "application/json",
-            "Content-Type": "application/json",
         }
 
-    async def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        json: dict[str, Any] | None = None,
-    ) -> Any:
+    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        """Make an authenticated request to Nuki."""
+        session = async_get_clientsession(self.hass)
         url = f"{API_BASE}{path}"
-        headers = await self._auth_headers()
 
-        async with self.session.request(
-            method,
-            url,
-            headers=headers,
-            json=json,
-        ) as resp:
-            if resp.status == 401:
-                raise ConfigEntryAuthFailed("Unauthorized")
+        headers = kwargs.pop("headers", {})
+        headers.update(await self._auth_headers())
 
-            if resp.status >= 400:
-                text = await resp.text()
-                raise RuntimeError(
-                    f"Nuki API error {resp.status}: {text}"
+        async with session.request(method, url, headers=headers, **kwargs) as resp:
+            # Fix 2: 401/403 should be treated as auth failure -> reauth
+            if resp.status in (401, 403):
+                body = await resp.text()
+                _LOGGER.warning(
+                    "Nuki API auth failed (HTTP %s) for %s %s. Body: %s",
+                    resp.status,
+                    method,
+                    path,
+                    body,
                 )
+                raise ConfigEntryAuthFailed(f"Nuki API auth failed (HTTP {resp.status})")
+
+            resp.raise_for_status()
 
             if resp.content_type == "application/json":
                 return await resp.json()
 
-            return None
+            text = await resp.text()
+            return text if text else None
 
-    # ---------------------------------------------------------------------
-    # Core API
-    # ---------------------------------------------------------------------
-
-    async def list_smartlocks(self) -> list[dict[str, Any]]:
+    async def list_smartlocks(self) -> Any:
+        """Return list of smartlocks."""
         return await self._request("GET", "/smartlock")
 
-    # ---------------------------------------------------------------------
-    # Decentral Webhooks (CORRECT per Nuki docs)
-    # ---------------------------------------------------------------------
+    async def register_decentral_webhook(self, webhook_url: str, features: list[str]) -> Any:
+        """Register a decentral webhook."""
+        payload = {"url": webhook_url, "features": features}
+        return await self._request("POST", "/webhook/decentral", json=payload)
 
-    async def register_decentral_webhook(
-        self,
-        webhook_url: str,
-        features: list[str],
-    ) -> dict[str, Any]:
-        """
-        Register decentral webhook.
-
-        PUT /api/decentralWebhook
-        {
-          "webhookUrl": "...",
-          "webhookFeatures": [...]
-        }
-        """
-        payload = {
-            "webhookUrl": webhook_url,
-            "webhookFeatures": features,
-        }
-
-        _LOGGER.debug(
-            "Registering Nuki decentral webhook: %s", payload
-        )
-
-        return await self._request(
-            "PUT",
-            "/api/decentralWebhook",
-            json=payload,
-        )
-
-    async def list_decentral_webhooks(self) -> list[dict[str, Any]]:
-        """GET /api/decentralWebhook"""
-        return await self._request("GET", "/api/decentralWebhook")
-
-    async def delete_decentral_webhook(self, webhook_id: str) -> None:
-        """DELETE /api/decentralWebhook/{id}"""
-        await self._request(
-            "DELETE",
-            f"/api/decentralWebhook/{webhook_id}",
-        )
+    async def delete_decentral_webhook(self, webhook_id: int) -> Any:
+        """Delete a decentral webhook."""
+        return await self._request("DELETE", f"/webhook/decentral/{int(webhook_id)}")
