@@ -85,12 +85,25 @@ NUKI_DEVICE_TYPE = {
     5: "smart_lock_4",
 }
 
-NUKI_COMPLETION_STATE = {
+# Nuki DEVICE_LOGS "state" field (observed in decentral webhook payloads)
+# Common values seen:
+# 0 = success / ok
+# 1+ can represent failure/blocked/aborted depending on device/firmware
+# DEVICE_LOGS "state" field (completion state) per Nuki Web API docs
+NUKI_LOG_STATE = {
     0: "success",
     1: "motor_blocked",
     2: "canceled",
     3: "too_recent",
     4: "busy",
-    5: "low_battery",
+    5: "low_motor_voltage",
+    6: "clutch_failure",
+    7: "motor_power_failure",
+    8: "incomplete",
+    9: "rejected",
+    10: "rejected_night_mode",
+    254: "other_error",
+    255: "unknown_error",
 }
+
 
