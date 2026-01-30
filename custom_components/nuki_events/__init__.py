@@ -6,18 +6,19 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.network import get_url
 
 from .api import NukiApi
 from .coordinator import NukiDataCoordinator
 from .const import (
+    CONF_WEBHOOK_ID,
+    CONF_WEBHOOK_SECRET,
+    DEFAULT_WEBHOOK_FEATURES,
     DOMAIN,
     PLATFORMS,
     WEBHOOK_PATH,
-    DEFAULT_WEBHOOK_FEATURES,
-    CONF_WEBHOOK_ID,
-    CONF_WEBHOOK_SECRET,
 )
 from .webhook import NukiWebhookView
 
@@ -47,6 +48,7 @@ def _ensure_expires_at(entry: ConfigEntry) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         return None
 
+    # Use wall clock here; HA's OAuth2Session expects epoch seconds for expires_at
     token["expires_at"] = time.time() + expires_in_int - 60
     return token
 
@@ -60,21 +62,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.http.register_view(NukiWebhookView(hass))
         hass.data[DOMAIN]["_view_registered"] = True
 
-    # Create HA OAuth session
+    # Create HA OAuth session (standard pattern)
     try:
-    implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
-        hass, entry
-    )
-except config_entry_oauth2_flow.ImplementationUnavailableError as err:
-    # Added in HA 2025.12+: treat as retryable when internet is temporarily unavailable
-    from homeassistant.exceptions import ConfigEntryNotReady
+        implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
+            hass, entry
+        )
+    except config_entry_oauth2_flow.ImplementationUnavailableError as err:
+        # HA recommends treating this as retryable (e.g., no internet/DNS at startup)
+        raise ConfigEntryNotReady(
+            "OAuth2 implementation temporarily unavailable, will retry"
+        ) from err
 
-    raise ConfigEntryNotReady(
-        "OAuth2 implementation temporarily unavailable, will retry"
-    ) from err
     oauth_session = config_entry_oauth2_flow.OAuth2Session(hass, entry, implementation)
 
-    # FIX: prevent KeyError 'expires_at'
+    # Ensure expires_at exists to prevent KeyError in HA refresh logic for older tokens
     new_token = _ensure_expires_at(entry)
     if new_token is not None:
         new_data = dict(entry.data)
@@ -107,7 +108,6 @@ except config_entry_oauth2_flow.ImplementationUnavailableError as err:
                 webhook_url=webhook_url, features=DEFAULT_WEBHOOK_FEATURES
             )
 
-            # FIX: resp can be None/non-dict
             if isinstance(resp, dict):
                 webhook_id = resp.get("id")
                 secret = resp.get("secret")
@@ -122,9 +122,11 @@ except config_entry_oauth2_flow.ImplementationUnavailableError as err:
 
                 hass.config_entries.async_update_entry(entry, data=new_data)
             else:
-                _LOGGER.error("Webhook registration returned unexpected response: %r", resp)
+                _LOGGER.error(
+                    "Webhook registration returned unexpected response: %r", resp
+                )
 
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to register Nuki decentral webhook: %s", err)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
