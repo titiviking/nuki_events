@@ -3,12 +3,18 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import NukiApi
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    NUKI_ACTION,
+    NUKI_COMPLETION_STATE,
+    NUKI_DEVICE_TYPE,
+    NUKI_SOURCE,
+    NUKI_TRIGGER,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -20,7 +26,7 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     then update entity state when a verified webhook arrives.
     """
 
-    def __init__(self, hass: HomeAssistant, api: NukiApi) -> None:
+    def __init__(self, hass, api: NukiApi) -> None:
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=None)
         self.api = api
 
@@ -92,6 +98,15 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _enum_label(mapping: dict[int, str], raw: Any) -> str:
+        """Translate an integer enum using a mapping, keeping unknowns explicit."""
+        try:
+            raw_int = int(raw)
+        except (TypeError, ValueError):
+            return "unknown"
+        return mapping.get(raw_int, f"unknown({raw_int})")
+
     async def async_handle_webhook(self, entry_id: str, payload: dict[str, Any]) -> None:
         """Handle a verified webhook payload and update coordinator state."""
         try:
@@ -108,42 +123,4 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._data["last_device_status"][sl_id] = event
 
             # Update "last actor" and log-derived fields when we get a log event
-            # DEVICE_LOGS are the ones that include name/authId/action/date.
-            if feature == "DEVICE_LOGS":
-                auth_id = event.get("authId") or event.get("auth_id")
-                name = (
-                    event.get("name")
-                    or event.get("authName")
-                    or event.get("accountUserName")
-                    or event.get("userName")
-                )
-                actor = name or (str(auth_id) if auth_id is not None else "unknown")
-
-                self._data["last_actor"][sl_id] = actor
-                if auth_id is not None:
-                    self._data["last_auth_id"][sl_id] = auth_id
-
-                # Copy over common fields when present (from the unwrapped smartlockLog dict)
-                for key, target in (
-                    ("action", "last_action"),
-                    ("trigger", "last_trigger"),
-                    ("completionState", "last_completion_state"),
-                    ("completion_state", "last_completion_state"),
-                    ("source", "last_source"),
-                    ("deviceType", "last_device_type"),
-                    ("device_type", "last_device_type"),
-                    ("date", "last_date"),
-                    ("timestamp", "last_date"),
-                ):
-                    if key in event:
-                        self._data[target][sl_id] = event.get(key)
-
-            # Count every event per lock (status + logs)
-            self._data["event_counter"][sl_id] = int(self._data["event_counter"].get(sl_id, 0)) + 1
-
-            # Push update to entities
-            self.async_set_updated_data(dict(self._data))
-            _LOGGER.debug("Processed webhook for smartlockId=%s (feature=%s)", sl_id, feature)
-
-        except Exception as err:
-            _LOGGER.exception("Failed processing webhook payload: %s", err)
+            # DEVICE_LOG_
