@@ -51,6 +51,7 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             locks = await self.api.list_smartlocks()
             if not isinstance(locks, list):
                 locks = []
+
             self._data["locks"] = locks
 
             # Prime last-actor info from latest logs so state isn't 'unknown' after restart
@@ -68,31 +69,31 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Coordinator update finished")
 
     async def _prime_from_latest_logs(self, locks: list[dict[str, Any]]) -> None:
-        """Fetch and apply the most recent log entry for each lock.
-
-        This should be cheap (limit=1), and avoids unknown sensor state after restart.
-        """
+        """Fetch and apply the most recent log entry for each lock (limit=1)."""
         for lock in locks:
-            # Nuki lock objects vary; support common keys
-            lock_id = lock.get("smartlockId") or lock.get("id")
-            sl_id = self._safe_int(lock_id)
+            sl_id = self._safe_int(
+                lock.get("smartlockId") or lock.get("smartlock_id") or lock.get("id")
+            )
             if sl_id is None:
                 continue
 
             try:
                 raw = await self.api.list_smartlock_logs(sl_id, limit=1)
             except ConfigEntryAuthFailed:
-                # Bubble up: if token is invalid, HA should reauth
                 raise
             except Exception as err:
-                _LOGGER.debug("Failed to fetch latest log for smartlockId=%s: %s", sl_id, err)
+                _LOGGER.debug(
+                    "Priming: failed to fetch latest log for smartlockId=%s: %s",
+                    sl_id,
+                    err,
+                )
                 continue
 
             latest = self._extract_latest_log(raw)
             if not latest:
+                _LOGGER.debug("Priming: no logs returned for smartlockId=%s", sl_id)
                 continue
 
-            # Apply as if it were a DEVICE_LOGS webhook event
             self._apply_log_event(sl_id, latest)
 
     @staticmethod
@@ -105,16 +106,14 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if isinstance(raw, list):
             return raw[0] if raw else None
 
-        # Sometimes wrapped in a dict like {"smartlockLogs": [...]} or {"logs": [...]}
+        # Wrapped dict cases
         if isinstance(raw, dict):
-            for key in ("smartlockLogs", "logs", "smartlockLog", "log"):
+            for key in ("smartlockLogs", "logs", "items", "data", "results"):
                 val = raw.get(key)
                 if isinstance(val, list):
                     return val[0] if val else None
-                if isinstance(val, dict):
-                    return val
-            # Or the dict itself might already be a log entry
-            # (has at least action/date/authId/etc.)
+
+            # Sometimes it’s a single log entry already
             if any(k in raw for k in ("action", "date", "authId", "name", "state")):
                 return raw
 
@@ -185,7 +184,7 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if "date" in event:
             self._data["last_date"][sl_id] = event["date"]
 
-        # Count this as an event to keep dashboards consistent
+        # Count as an event (consistent)
         self._data["event_counter"][sl_id] = self._data["event_counter"].get(sl_id, 0) + 1
 
     async def async_handle_webhook(self, entry_id: str, payload: dict[str, Any]) -> None:
@@ -199,7 +198,6 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             if feature == "DEVICE_STATUS":
                 self._data["last_device_status"][sl_id] = event
-                # Count status events too (optional but consistent with previous behavior)
                 self._data["event_counter"][sl_id] = self._data["event_counter"].get(sl_id, 0) + 1
 
             if feature == "DEVICE_LOGS":
