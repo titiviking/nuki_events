@@ -27,7 +27,10 @@ class NukiApi:
         Fix 1: async_ensure_token_valid() can return None; never call .get() on None.
         Raise ConfigEntryAuthFailed so HA can trigger reauth instead of crashing.
         """
-        token = await self.oauth_session.async_ensure_token_valid()
+        # HA's OAuth2Session.async_ensure_token_valid() updates the stored token
+        # but does not return it. Use oauth_session.token after ensuring validity.
+        await self.oauth_session.async_ensure_token_valid()
+        token = getattr(self.oauth_session, "token", None)
 
         if not token or not isinstance(token, dict):
             raise ConfigEntryAuthFailed("Missing OAuth token (reauth required)")

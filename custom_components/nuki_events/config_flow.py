@@ -8,6 +8,18 @@ from homeassistant.helpers import config_entry_oauth2_flow
 
 from .const import DOMAIN
 
+
+def _normalize_oauth_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Ensure OAuth flow data stores the token in the expected shape."""
+    if "token" in data:
+        return data
+
+    if "access_token" in data:
+        return {"token": dict(data)}
+
+    return data
+
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -23,13 +35,14 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
 
     async def async_oauth_create_entry(self, data: dict[str, Any]) -> config_entries.FlowResult:
         """Create or update a config entry after OAuth2 has completed."""
+        normalized_data = _normalize_oauth_data(data)
         # For reauth flows, HA will set `self.source` and `self.context["entry_id"]`
         if self.source == config_entries.SOURCE_REAUTH:
             entry_id = self.context.get("entry_id")
             if entry_id:
                 entry = self.hass.config_entries.async_get_entry(entry_id)
                 if entry:
-                    new_data = {**entry.data, **data}
+                    new_data = {**entry.data, **normalized_data}
                     self.hass.config_entries.async_update_entry(entry, data=new_data)
                     return self.async_abort(reason="reauth_successful")
 
@@ -37,7 +50,7 @@ class OAuth2FlowHandler(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, doma
         await self.async_set_unique_id(DOMAIN)
         self._abort_if_unique_id_configured()
 
-        return self.async_create_entry(title="Nuki Events", data=data)
+        return self.async_create_entry(title="Nuki Events", data=normalized_data)
 
     async def async_step_reauth(self, user_input: dict[str, Any] | None = None) -> config_entries.FlowResult:
         """Perform re-authentication."""
