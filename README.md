@@ -72,8 +72,8 @@ The integration is webhook-driven (no aggressive polling) and focuses on **who d
 
 > ⚠️ The redirect URL shown by Home Assistant must be added **exactly** to your OAuth app in Nuki Web.
 > 2 options:
->   Through https://my.home-assistant.io/redirect/oauth
->   Direct to instance https://<my_domai>/auth/external/callback (make sure external routing & DNS are properly setup)
+> - Through https://my.home-assistant.io/redirect/oauth
+> - Direct to instance https://<my_domai>/auth/external/callback (make sure external routing & DNS are properly setup)
 
 ---
 
