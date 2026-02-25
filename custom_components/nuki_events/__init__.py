@@ -30,14 +30,39 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
 
 
-def _ensure_expires_at(entry: ConfigEntry) -> dict[str, Any] | None:
-    """Ensure stored OAuth token has expires_at (HA requires it)."""
-    token: dict[str, Any] = dict(entry.data.get("token") or {})
+def _normalize_and_enrich_token(entry: ConfigEntry) -> dict[str, Any] | None:
+    """Normalize OAuth token shape and ensure expires_at is available.
+
+    Older versions may store token fields at the top-level of entry.data.
+    Convert that shape into the expected ``{"token": {...}}`` layout and add
+    ``expires_at`` when possible.
+    """
+    token_data = entry.data.get("token")
+    if isinstance(token_data, dict):
+        token: dict[str, Any] = dict(token_data)
+    elif "access_token" in entry.data:
+        token = {
+            key: entry.data[key]
+            for key in (
+                "access_token",
+                "token_type",
+                "refresh_token",
+                "expires_in",
+                "scope",
+                "expires_at",
+            )
+            if key in entry.data
+        }
+    else:
+        token = {}
+
     if not token:
         return None
 
+    changed = token_data != token
+
     if "expires_at" in token:
-        return None
+        return token if changed else None
 
     expires_in = token.get("expires_in")
     if expires_in is None:
@@ -46,7 +71,7 @@ def _ensure_expires_at(entry: ConfigEntry) -> dict[str, Any] | None:
     try:
         expires_in_int = int(expires_in)
     except (TypeError, ValueError):
-        return None
+        return token if changed else None
 
     # Use wall clock here; HA's OAuth2Session expects epoch seconds for expires_at
     token["expires_at"] = time.time() + expires_in_int - 60
@@ -75,11 +100,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     oauth_session = config_entry_oauth2_flow.OAuth2Session(hass, entry, implementation)
 
-    # Ensure expires_at exists to prevent KeyError in HA refresh logic for older tokens
-    new_token = _ensure_expires_at(entry)
+    # Normalize legacy token storage and ensure expires_at for HA refresh logic.
+    new_token = _normalize_and_enrich_token(entry)
     if new_token is not None:
         new_data = dict(entry.data)
         new_data["token"] = new_token
+        for key in (
+            "access_token",
+            "token_type",
+            "refresh_token",
+            "expires_in",
+            "scope",
+            "expires_at",
+        ):
+            new_data.pop(key, None)
         hass.config_entries.async_update_entry(entry, data=new_data)
 
     api = NukiApi(hass, entry, oauth_session=oauth_session)
