@@ -20,7 +20,7 @@ The integration is webhook-driven (no aggressive polling) and focuses on **who d
 - Webhook handling for:
   - `DEVICE_LOGS` (lock / unlock actions, actor, timestamps)
   - `DEVICE_STATUS` (battery, door state, etc. – stored internally for future use)
-- Creates a sensor exposing the **last actor** (person/device) that triggered a lock action
+- Creates sensors exposing the **last actor** and **last action** for each lock event
 - Exposes rich, **human-readable attributes** (no numeric enums):
   - action (`lock`, `unlock`, `unlatch`, …)
   - trigger (`app`, `keypad`, `fingerprint`, …)
@@ -111,6 +111,21 @@ A single sensor is created that represents the **last actor** who interacted wit
 
 All enum values are translated into **human-readable strings**.  
 Unknown future values will appear as `unknown(<value>)`.
+
+### Sensor: Smartlock Last Action
+
+A second sensor is created for each lock to represent the **last action** in a UI-friendly format.
+
+#### Sensor state
+- Last action in title case (e.g. `Unlock`, `Lock`, `Lock N Go With Unlatch`)
+
+#### Attributes
+- `actor`: Last actor linked to that action
+- `trigger`: How the action was triggered (`app`, `keypad`, `fingerprint`, …)
+- `source`: Source system (`nuki_app`, `bridge`, `keypad`, …)
+- `completion_state`: Result of the action (`success`, `low_battery`, …)
+- `date`: ISO timestamp of the event (UTC)
+- `event_counter`: Number of processed events for the lock
 
 ---
 
