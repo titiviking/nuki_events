@@ -22,9 +22,6 @@ class NukiWebhookView(HomeAssistantView):
     name = "api:nuki_events_webhook"
     url = "/api/nuki_events/webhook/{entry_id}"
 
-    def __init__(self, hass) -> None:
-        self.hass = hass
-
     async def post(self, request: web.Request, entry_id: str) -> web.Response:
         data = self.hass.data.get(DOMAIN, {}).get(entry_id)
         if not data:

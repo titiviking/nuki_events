@@ -190,7 +190,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Register webhook view once
     if not hass.data[DOMAIN].get("_view_registered"):
-        hass.http.register_view(NukiWebhookView(hass))
+        hass.http.register_view(NukiWebhookView())
         hass.data[DOMAIN]["_view_registered"] = True
 
     # Create HA OAuth session (standard pattern)
@@ -267,4 +267,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        # If no entry data keys remain (ignoring the _view_registered sentinel),
+        # clear the flag so the webhook view is re-registered on a fresh setup
+        # without requiring a full HA restart.
+        remaining = [k for k in hass.data.get(DOMAIN, {}) if k != "_view_registered"]
+        if not remaining:
+            hass.data.get(DOMAIN, {}).pop("_view_registered", None)
     return unload_ok

@@ -245,12 +245,12 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._data["last_device_status"][sl_id] = event
                 self._data["event_counter"][sl_id] = self._data["event_counter"].get(sl_id, 0) + 1
 
-            if feature == "DEVICE_LOGS":
+            elif feature == "DEVICE_LOGS":
                 # Webhook DEVICE_LOGS payloads include the actor name directly
                 # in the smartlockLog object, so no auth lookup is needed here.
                 self._apply_log_event(sl_id, event)
 
-            if feature == "DEVICE_AUTHS":
+            elif feature == "DEVICE_AUTHS":
                 # An authorization was added, removed, or renamed.  Invalidate
                 # the cached name map for this lock so the next priming cycle
                 # (on HA reload) fetches fresh data from the API.
@@ -259,6 +259,17 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "DEVICE_AUTHS webhook received for smartlockId=%s — auth name cache invalidated.",
                     sl_id,
                 )
+
+            else:
+                # Feature is subscribed but not yet handled (e.g. DEVICE_MASTERDATA,
+                # DEVICE_CONFIG).  Skip the state push to avoid spurious entity
+                # re-renders when nothing actually changed.
+                _LOGGER.debug(
+                    "Unhandled webhook feature=%s for smartlockId=%s — ignoring.",
+                    feature,
+                    sl_id,
+                )
+                return
 
             self.async_set_updated_data({k: dict(v) if isinstance(v, dict) else v for k, v in self._data.items()})
             _LOGGER.debug(
