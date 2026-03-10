@@ -6,7 +6,9 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .const import API_BASE
 
@@ -26,8 +28,30 @@ class NukiApi:
 
         Important: HA's OAuth2Session.async_ensure_token_valid() updates the stored token
         but does not return it. Use oauth_session.token after ensuring validity.
+
+        Since HA 2026.3 the OAuth2 helper raises typed exceptions instead of
+        propagating raw aiohttp errors:
+          - OAuth2TokenRequestReauthError  → non-recoverable, needs reauth
+          - OAuth2TokenRequestTransientError → transient (5xx / 429), can retry
+          - OAuth2TokenRequestError        → base catch-all for all token errors
+        We map these to the correct HA coordinator signals so the DataUpdateCoordinator
+        can trigger reauth or retry automatically.
         """
-        await self.oauth_session.async_ensure_token_valid()
+        try:
+            await self.oauth_session.async_ensure_token_valid()
+        except config_entry_oauth2_flow.OAuth2TokenRequestReauthError as err:
+            raise ConfigEntryAuthFailed(
+                "Nuki OAuth token refresh requires reauthentication"
+            ) from err
+        except config_entry_oauth2_flow.OAuth2TokenRequestTransientError as err:
+            # Transient server-side failure (5xx / 429) — signal the coordinator to retry
+            raise UpdateFailed(f"Transient OAuth token refresh failure: {err}") from err
+        except config_entry_oauth2_flow.OAuth2TokenRequestError as err:
+            # Unknown / base error — treat as auth failure so the user is prompted
+            raise ConfigEntryAuthFailed(
+                f"OAuth token refresh failed: {err}"
+            ) from err
+
         token = getattr(self.oauth_session, "token", None)
 
         if not token or not isinstance(token, dict):

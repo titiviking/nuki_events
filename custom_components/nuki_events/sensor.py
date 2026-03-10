@@ -54,6 +54,10 @@ class NukiBaseSensor(CoordinatorEntity[NukiDataCoordinator], SensorEntity):
 
 class NukiLastActorSensor(NukiBaseSensor):
     _attr_icon = "mdi:account-key"
+    # event_counter is a monotonically increasing integer — recording it would
+    # write a new row on every lock event with no historical analytical value.
+    # authId is a raw numeric key; the resolved name is already in native_value.
+    _unrecorded_attributes = frozenset({"event_counter", "authId"})
 
     def __init__(
         self,
@@ -63,7 +67,7 @@ class NukiLastActorSensor(NukiBaseSensor):
     ) -> None:
         super().__init__(coordinator, smartlock_id, lock_name)
         self._attr_unique_id = f"nuki_events_{smartlock_id}_last_actor"
-        self._attr_name = "Last Actor"
+        self._attr_translation_key = "last_actor"
 
     @property
     def native_value(self):
@@ -86,6 +90,8 @@ class NukiLastActorSensor(NukiBaseSensor):
 
 class NukiLastActionSensor(NukiBaseSensor):
     _attr_icon = "mdi:lock-alert"
+    # event_counter changes on every lock event; no value recording it in history.
+    _unrecorded_attributes = frozenset({"event_counter"})
 
     def __init__(
         self,
@@ -95,7 +101,7 @@ class NukiLastActionSensor(NukiBaseSensor):
     ) -> None:
         super().__init__(coordinator, smartlock_id, lock_name)
         self._attr_unique_id = f"nuki_events_{smartlock_id}_last_action"
-        self._attr_name = "Last Action"
+        self._attr_translation_key = "last_action"
 
     @staticmethod
     def _format_action(action: str | None) -> str | None:
