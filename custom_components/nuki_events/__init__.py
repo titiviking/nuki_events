@@ -246,6 +246,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
+    # Best-effort: remove the decentral webhook from Nuki's server so it stops
+    # posting to a URL that will no longer be handled.  Failure is non-fatal —
+    # the entry is unloaded regardless; a stale registration will be cleaned up
+    # on the next successful setup via _ensure_webhook_registered.
+    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    webhook_id = entry.data.get(CONF_WEBHOOK_ID)
+    api: NukiApi | None = entry_data.get("api")
+    if webhook_id and api:
+        try:
+            await api.delete_decentral_webhook(webhook_id)
+            _LOGGER.debug("Deleted Nuki decentral webhook id=%s on unload.", webhook_id)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Could not delete Nuki webhook id=%s on unload (will be cleaned up on next load): %s",
+                webhook_id,
+                err,
+            )
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)

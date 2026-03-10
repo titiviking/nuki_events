@@ -16,7 +16,8 @@
       "invalid_state": "Invalid state value returned from Nuki. Please retry."
     },
     "abort": {
-      "reauth_successful": "Re-authentication was successful."
+      "reauth_successful": "Re-authentication was successful.",
+      "already_configured": "Nuki Events is already configured."
     }
   },
   "application_credentials": {

@@ -79,6 +79,7 @@ NUKI_SOURCE = {
 
 NUKI_DEVICE_TYPE = {
     0: "smart_lock",
+    1: "opener_v1",
     2: "opener",
     3: "smart_door",
     4: "smart_lock_3",
@@ -105,5 +106,3 @@ NUKI_LOG_STATE = {
     254: "other_error",
     255: "unknown_error",
 }
-
-

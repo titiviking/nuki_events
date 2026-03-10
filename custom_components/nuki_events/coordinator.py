@@ -47,6 +47,11 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "last_device_status": {},
         }
 
+        # Per-lock auth name cache: {sl_id: {auth_id: name}}.
+        # Built during startup priming, invalidated when a DEVICE_AUTHS webhook
+        # arrives so the next priming cycle picks up renames/additions.
+        self._auth_name_cache: dict[int, dict[int, str]] = {}
+
     async def _async_update_data(self) -> dict[str, Any]:
         _LOGGER.debug("Coordinator update started")
         try:
@@ -59,7 +64,7 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Prime last-actor info from latest logs so state isn't 'unknown' after restart.
             await self._prime_from_latest_logs(locks)
 
-            return dict(self._data)
+            return {k: dict(v) if isinstance(v, dict) else v for k, v in self._data.items()}
 
         except ConfigEntryAuthFailed:
             _LOGGER.exception("Coordinator auth failed (reauth required)")
@@ -77,10 +82,16 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _fetch_auth_name_map(self, sl_id: int) -> dict[int, str]:
         """Return a mapping of {authId: name} for a given smartlock.
 
-        Calls GET /smartlock/{id}/auth and builds a lookup dict so that a raw
-        authId from a log entry can be resolved to a human-readable name.
+        Results are cached per lock for the lifetime of this coordinator instance.
+        The cache is invalidated when a DEVICE_AUTHS webhook is received so that
+        renames or new authorizations are reflected after the next HA reload or
+        coordinator refresh.
+
         Returns an empty dict on any failure so callers degrade gracefully.
         """
+        if sl_id in self._auth_name_cache:
+            return self._auth_name_cache[sl_id]
+
         try:
             auths = await self.api.list_smartlock_auths(sl_id)
         except ConfigEntryAuthFailed:
@@ -109,6 +120,7 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if auth_id is not None and name:
                 name_map[auth_id] = name
 
+        self._auth_name_cache[sl_id] = name_map
         return name_map
 
     # ------------------------------------------------------------------
@@ -238,7 +250,17 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # in the smartlockLog object, so no auth lookup is needed here.
                 self._apply_log_event(sl_id, event)
 
-            self.async_set_updated_data(dict(self._data))
+            if feature == "DEVICE_AUTHS":
+                # An authorization was added, removed, or renamed.  Invalidate
+                # the cached name map for this lock so the next priming cycle
+                # (on HA reload) fetches fresh data from the API.
+                self._auth_name_cache.pop(sl_id, None)
+                _LOGGER.debug(
+                    "DEVICE_AUTHS webhook received for smartlockId=%s — auth name cache invalidated.",
+                    sl_id,
+                )
+
+            self.async_set_updated_data({k: dict(v) if isinstance(v, dict) else v for k, v in self._data.items()})
             _LOGGER.debug(
                 "Processed webhook for smartlockId=%s (feature=%s)",
                 sl_id,

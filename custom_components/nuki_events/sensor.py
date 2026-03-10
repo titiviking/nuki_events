@@ -63,7 +63,7 @@ class NukiLastActorSensor(NukiBaseSensor):
     ) -> None:
         super().__init__(coordinator, smartlock_id, lock_name)
         self._attr_unique_id = f"nuki_events_{smartlock_id}_last_actor"
-        self._attr_name = f"{lock_name} last actor"
+        self._attr_name = "Last Actor"
 
     @property
     def native_value(self):
@@ -95,7 +95,7 @@ class NukiLastActionSensor(NukiBaseSensor):
     ) -> None:
         super().__init__(coordinator, smartlock_id, lock_name)
         self._attr_unique_id = f"nuki_events_{smartlock_id}_last_action"
-        self._attr_name = f"{lock_name} last action"
+        self._attr_name = "Last Action"
 
     @staticmethod
     def _format_action(action: str | None) -> str | None:

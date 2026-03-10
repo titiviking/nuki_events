@@ -1,7 +1,7 @@
 {
   "domain": "nuki_events",
   "name": "Nuki Events",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "documentation": "https://api.nuki.io/",
   "config_flow": true,
   "oauth2": {
