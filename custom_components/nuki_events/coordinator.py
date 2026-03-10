@@ -213,6 +213,82 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return None
 
     # ------------------------------------------------------------------
+    # State restoration (RestoreSensor)
+    # ------------------------------------------------------------------
+
+    def restore_state(
+        self, sl_id: int, actor: str, extra: dict[str, Any]
+    ) -> None:
+        """Seed coordinator data from a restored NukiLastActorSensor state.
+
+        Called by NukiLastActorSensor.async_added_to_hass only when the
+        coordinator has no live data for this lock yet (i.e. API priming
+        returned nothing).  Populates every sub-dict that the sensor's
+        extra_state_attributes reads so that all fields are consistent from
+        the very first render.
+        """
+        self._data["last_actor"].setdefault(sl_id, actor)
+
+        # Restore rich attributes from the persisted extra_data dict so that
+        # the full context (action, trigger, date, etc.) is also available
+        # immediately — not just the primary native_value.
+        for dest_key, extra_key in (
+            ("last_action", "action"),
+            ("last_trigger", "trigger"),
+            ("last_completion_state", "completion_state"),
+            ("last_source", "source"),
+            ("last_device_type", "deviceType"),
+            ("last_date", "date"),
+        ):
+            val = extra.get(extra_key)
+            if val is not None:
+                self._data[dest_key].setdefault(sl_id, val)
+
+        auth_id = extra.get("authId")
+        if auth_id is not None:
+            try:
+                self._data["last_auth_id"].setdefault(sl_id, int(auth_id))
+            except (TypeError, ValueError):
+                pass
+
+        _LOGGER.debug(
+            "Coordinator: restored actor state for smartlockId=%s from HA storage.", sl_id
+        )
+
+    def restore_action_state(
+        self, sl_id: int, action: str, extra: dict[str, Any]
+    ) -> None:
+        """Seed coordinator data from a restored NukiLastActionSensor state.
+
+        Mirrors restore_state but seeds the action-centric fields.  The
+        actor field is also populated from the extra_data 'actor' key so
+        that both sensors are immediately consistent after a cold start.
+        """
+        # NukiLastActionSensor stores the formatted action string (e.g. "Lock")
+        # but the coordinator keeps the raw snake_case value.  We reverse the
+        # title-case formatting to get back to the stored enum label.
+        raw_action = action.replace(" ", "_").lower() if action else action
+        self._data["last_action"].setdefault(sl_id, raw_action)
+
+        for dest_key, extra_key in (
+            ("last_trigger", "trigger"),
+            ("last_completion_state", "completion_state"),
+            ("last_source", "source"),
+            ("last_date", "date"),
+        ):
+            val = extra.get(extra_key)
+            if val is not None:
+                self._data[dest_key].setdefault(sl_id, val)
+
+        actor = extra.get("actor")
+        if actor is not None:
+            self._data["last_actor"].setdefault(sl_id, actor)
+
+        _LOGGER.debug(
+            "Coordinator: restored action state for smartlockId=%s from HA storage.", sl_id
+        )
+
+    # ------------------------------------------------------------------
     # Webhook handling
     # ------------------------------------------------------------------
 
