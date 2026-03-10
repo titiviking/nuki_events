@@ -12,9 +12,9 @@ from .const import (
     DOMAIN,
     NUKI_ACTION,
     NUKI_DEVICE_TYPE,
+    NUKI_LOG_STATE,
     NUKI_SOURCE,
     NUKI_TRIGGER,
-    NUKI_LOG_STATE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -23,8 +23,10 @@ _LOGGER = logging.getLogger(__name__)
 class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Webhook-driven coordinator that stores 'last actor' per smartlock.
 
-    On startup (first refresh), we also fetch the most recent logs per lock to avoid
-    the sensor staying 'unknown' until the first webhook arrives.
+    On startup (first refresh), we fetch the most recent log entry per lock
+    and resolve the actor name from the lock's auth list, so sensors show a
+    meaningful value immediately rather than staying 'unknown' until the first
+    webhook arrives.
     """
 
     def __init__(self, hass: HomeAssistant, api: NukiApi) -> None:
@@ -54,7 +56,7 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             self._data["locks"] = locks
 
-            # Prime last-actor info from latest logs so state isn't 'unknown' after restart
+            # Prime last-actor info from latest logs so state isn't 'unknown' after restart.
             await self._prime_from_latest_logs(locks)
 
             return dict(self._data)
@@ -68,8 +70,53 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         finally:
             _LOGGER.debug("Coordinator update finished")
 
+    # ------------------------------------------------------------------
+    # Auth name resolution
+    # ------------------------------------------------------------------
+
+    async def _fetch_auth_name_map(self, sl_id: int) -> dict[int, str]:
+        """Return a mapping of {authId: name} for a given smartlock.
+
+        Calls GET /smartlock/{id}/auth and builds a lookup dict so that a raw
+        authId from a log entry can be resolved to a human-readable name.
+        Returns an empty dict on any failure so callers degrade gracefully.
+        """
+        try:
+            auths = await self.api.list_smartlock_auths(sl_id)
+        except ConfigEntryAuthFailed:
+            raise
+        except Exception as err:
+            _LOGGER.debug(
+                "Priming: could not fetch auth list for smartlockId=%s: %s",
+                sl_id,
+                err,
+            )
+            return {}
+
+        if not isinstance(auths, list):
+            return {}
+
+        name_map: dict[int, str] = {}
+        for auth in auths:
+            if not isinstance(auth, dict):
+                continue
+            auth_id = self._safe_int(auth.get("id") or auth.get("authId"))
+            name = (
+                auth.get("name")
+                or auth.get("accountUserName")
+                or auth.get("userName")
+            )
+            if auth_id is not None and name:
+                name_map[auth_id] = name
+
+        return name_map
+
+    # ------------------------------------------------------------------
+    # Startup priming
+    # ------------------------------------------------------------------
+
     async def _prime_from_latest_logs(self, locks: list[dict[str, Any]]) -> None:
-        """Fetch and apply the most recent log entry for each lock (limit=1)."""
+        """Fetch the most recent log entry and resolve actor name for each lock."""
         for lock in locks:
             sl_id = self._safe_int(
                 lock.get("smartlockId") or lock.get("smartlock_id") or lock.get("id")
@@ -77,6 +124,7 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if sl_id is None:
                 continue
 
+            # --- 1. Fetch the latest log entry ---
             try:
                 raw = await self.api.list_smartlock_logs(sl_id, limit=1)
             except ConfigEntryAuthFailed:
@@ -93,6 +141,39 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not latest:
                 _LOGGER.debug("Priming: no logs returned for smartlockId=%s", sl_id)
                 continue
+
+            # --- 2. Resolve actor name from auth list if log lacks a name ---
+            # The /smartlock/{id}/log endpoint returns authId but frequently
+            # omits the human-readable name.  We resolve it separately so the
+            # sensor shows a real name rather than a raw numeric ID or "unknown".
+            if not (
+                latest.get("name")
+                or latest.get("authName")
+                or latest.get("accountUserName")
+                or latest.get("userName")
+            ):
+                auth_id = self._safe_int(
+                    latest.get("authId") or latest.get("auth_id")
+                )
+                if auth_id is not None:
+                    auth_name_map = await self._fetch_auth_name_map(sl_id)
+                    resolved_name = auth_name_map.get(auth_id)
+                    if resolved_name:
+                        # Inject the resolved name so _apply_log_event picks it up.
+                        latest = dict(latest)
+                        latest["name"] = resolved_name
+                        _LOGGER.debug(
+                            "Priming: resolved authId=%s → %r for smartlockId=%s",
+                            auth_id,
+                            resolved_name,
+                            sl_id,
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "Priming: authId=%s not found in auth list for smartlockId=%s",
+                            auth_id,
+                            sl_id,
+                        )
 
             self._apply_log_event(sl_id, latest)
 
@@ -113,11 +194,15 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if isinstance(val, list):
                     return val[0] if val else None
 
-            # Sometimes it’s a single log entry already
+            # Sometimes it's a single log entry already
             if any(k in raw for k in ("action", "date", "authId", "name", "state")):
                 return raw
 
         return None
+
+    # ------------------------------------------------------------------
+    # Webhook handling
+    # ------------------------------------------------------------------
 
     def _normalize_webhook_payload(
         self, payload: dict[str, Any]
@@ -134,6 +219,38 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         smartlock_id = payload.get("smartlockId") or payload.get("smartlock_id")
         return self._safe_int(smartlock_id), payload
+
+    async def async_handle_webhook(self, entry_id: str, payload: dict[str, Any]) -> None:
+        try:
+            sl_id, event = self._normalize_webhook_payload(payload)
+            if sl_id is None:
+                _LOGGER.debug("Webhook payload missing smartlockId: %s", payload)
+                return
+
+            feature = event.get("feature")
+
+            if feature == "DEVICE_STATUS":
+                self._data["last_device_status"][sl_id] = event
+                self._data["event_counter"][sl_id] = self._data["event_counter"].get(sl_id, 0) + 1
+
+            if feature == "DEVICE_LOGS":
+                # Webhook DEVICE_LOGS payloads include the actor name directly
+                # in the smartlockLog object, so no auth lookup is needed here.
+                self._apply_log_event(sl_id, event)
+
+            self.async_set_updated_data(dict(self._data))
+            _LOGGER.debug(
+                "Processed webhook for smartlockId=%s (feature=%s)",
+                sl_id,
+                feature,
+            )
+
+        except Exception as err:
+            _LOGGER.exception("Failed processing webhook payload: %s", err)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _safe_int(value: Any) -> int | None:
@@ -186,29 +303,3 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Count as an event (consistent)
         self._data["event_counter"][sl_id] = self._data["event_counter"].get(sl_id, 0) + 1
-
-    async def async_handle_webhook(self, entry_id: str, payload: dict[str, Any]) -> None:
-        try:
-            sl_id, event = self._normalize_webhook_payload(payload)
-            if sl_id is None:
-                _LOGGER.debug("Webhook payload missing smartlockId: %s", payload)
-                return
-
-            feature = event.get("feature")
-
-            if feature == "DEVICE_STATUS":
-                self._data["last_device_status"][sl_id] = event
-                self._data["event_counter"][sl_id] = self._data["event_counter"].get(sl_id, 0) + 1
-
-            if feature == "DEVICE_LOGS":
-                self._apply_log_event(sl_id, event)
-
-            self.async_set_updated_data(dict(self._data))
-            _LOGGER.debug(
-                "Processed webhook for smartlockId=%s (feature=%s)",
-                sl_id,
-                feature,
-            )
-
-        except Exception as err:
-            _LOGGER.exception("Failed processing webhook payload: %s", err)

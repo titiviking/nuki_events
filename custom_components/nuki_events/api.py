@@ -81,13 +81,20 @@ class NukiApi:
 
     async def list_smartlock_logs(self, smartlock_id: int, limit: int = 1) -> Any:
         """Return recent log entries for a smartlock."""
-        # Nuki Web API commonly supports /smartlock/{id}/log or /smartlock/log
-        # depending on version. Use the one your docs specify.
         return await self._request(
             "GET",
             f"/smartlock/{int(smartlock_id)}/log",
             params={"limit": int(limit)},
         )
+
+    async def list_smartlock_auths(self, smartlock_id: int) -> Any:
+        """Return the list of authorizations for a smartlock.
+
+        Used during startup priming to resolve a raw authId from a log entry
+        into a human-readable name (GET /smartlock/{id}/auth).
+        Requires the smartlock.auth scope.
+        """
+        return await self._request("GET", f"/smartlock/{int(smartlock_id)}/auth")
 
     # ---------------------------------------------------------------------
     # Decentral webhooks (FIXED)
