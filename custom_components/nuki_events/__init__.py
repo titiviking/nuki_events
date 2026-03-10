@@ -78,6 +78,112 @@ def _normalize_and_enrich_token(entry: ConfigEntry) -> dict[str, Any] | None:
     return token
 
 
+async def _ensure_webhook_registered(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    api: NukiApi,
+) -> None:
+    """Ensure a valid decentral webhook is registered with Nuki.
+
+    On every entry load we verify the stored webhook_id still exists on the
+    Nuki server side.  If the webhook is gone (e.g. the user reset their Nuki
+    account, revoked the token, or the webhook was deleted externally) we clear
+    the stale id/secret and re-register so push events are not silently lost.
+
+    All failures are treated as non-fatal: a warning is logged and entity setup
+    continues.  The integration can still poll for state on the next coordinator
+    refresh — it just won't receive real-time push events until the next
+    successful HA reload or until the webhook is restored manually.
+    """
+    existing_webhook_id = entry.data.get(CONF_WEBHOOK_ID)
+    existing_secret = entry.data.get(CONF_WEBHOOK_SECRET)
+
+    needs_registration = True  # default: register unless we confirm it's live
+
+    if existing_webhook_id and existing_secret:
+        # Verify the stored webhook still exists on the Nuki server.
+        try:
+            registered = await api.list_decentral_webhooks()
+            if isinstance(registered, list):
+                live_ids = {
+                    int(w["id"])
+                    for w in registered
+                    if isinstance(w, dict) and w.get("id") is not None
+                }
+                if int(existing_webhook_id) in live_ids:
+                    _LOGGER.debug(
+                        "Nuki webhook id=%s is still active; skipping re-registration.",
+                        existing_webhook_id,
+                    )
+                    needs_registration = False
+                else:
+                    _LOGGER.warning(
+                        "Stored Nuki webhook id=%s no longer exists on the server "
+                        "(found ids: %s). Clearing stale credentials and re-registering.",
+                        existing_webhook_id,
+                        live_ids,
+                    )
+                    # Clear stale data so we fall through to re-registration below.
+                    new_data = dict(entry.data)
+                    new_data.pop(CONF_WEBHOOK_ID, None)
+                    new_data.pop(CONF_WEBHOOK_SECRET, None)
+                    hass.config_entries.async_update_entry(entry, data=new_data)
+                    hass.data[DOMAIN][entry.entry_id]["webhook_id"] = None
+                    hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = None
+            else:
+                # Unexpected response shape — log and attempt re-registration to be safe.
+                _LOGGER.warning(
+                    "Unexpected response from GET /api/decentralWebhook: %r. "
+                    "Will attempt re-registration.",
+                    registered,
+                )
+        except Exception as err:  # noqa: BLE001
+            # Network error, auth failure, etc.  Do not block setup — keep the
+            # existing credentials in place and skip re-registration this cycle.
+            _LOGGER.warning(
+                "Could not verify Nuki webhook liveness (will keep existing "
+                "credentials): %s",
+                err,
+            )
+            needs_registration = False
+
+    if not needs_registration:
+        return
+
+    # Register a fresh webhook.
+    try:
+        base = get_url(hass, prefer_external=True)
+        webhook_url = f"{base}{WEBHOOK_PATH}/{entry.entry_id}"
+
+        resp = await api.register_decentral_webhook(
+            webhook_url=webhook_url, features=DEFAULT_WEBHOOK_FEATURES
+        )
+
+        if isinstance(resp, dict):
+            webhook_id = resp.get("id")
+            secret = resp.get("secret")
+
+            new_data = dict(entry.data)
+            if webhook_id is not None:
+                new_data[CONF_WEBHOOK_ID] = int(webhook_id)
+                hass.data[DOMAIN][entry.entry_id]["webhook_id"] = int(webhook_id)
+            if secret:
+                new_data[CONF_WEBHOOK_SECRET] = secret
+                hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = secret
+
+            hass.config_entries.async_update_entry(entry, data=new_data)
+            _LOGGER.debug(
+                "Nuki decentral webhook registered successfully (id=%s).", webhook_id
+            )
+        else:
+            _LOGGER.error(
+                "Webhook registration returned unexpected response: %r", resp
+            )
+
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.error("Failed to register Nuki decentral webhook: %s", err)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the integration from a config entry."""
     hass.data.setdefault(DOMAIN, {})
@@ -129,39 +235,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "oauth_session": oauth_session,
     }
 
-    # Best-effort webhook registration (do not block entity setup)
-    existing_webhook_id = entry.data.get(CONF_WEBHOOK_ID)
-    existing_secret = entry.data.get(CONF_WEBHOOK_SECRET)
-
-    if not (existing_webhook_id and existing_secret):
-        try:
-            base = get_url(hass, prefer_external=True)
-            webhook_url = f"{base}{WEBHOOK_PATH}/{entry.entry_id}"
-
-            resp = await api.register_decentral_webhook(
-                webhook_url=webhook_url, features=DEFAULT_WEBHOOK_FEATURES
-            )
-
-            if isinstance(resp, dict):
-                webhook_id = resp.get("id")
-                secret = resp.get("secret")
-
-                new_data = dict(entry.data)
-                if webhook_id is not None:
-                    new_data[CONF_WEBHOOK_ID] = int(webhook_id)
-                    hass.data[DOMAIN][entry.entry_id]["webhook_id"] = int(webhook_id)
-                if secret:
-                    new_data[CONF_WEBHOOK_SECRET] = secret
-                    hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = secret
-
-                hass.config_entries.async_update_entry(entry, data=new_data)
-            else:
-                _LOGGER.error(
-                    "Webhook registration returned unexpected response: %r", resp
-                )
-
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Failed to register Nuki decentral webhook: %s", err)
+    # Verify the stored webhook is still live on the Nuki server and re-register
+    # if it has gone missing.  This is intentionally non-blocking: failures are
+    # logged as warnings and entity setup continues regardless.
+    await _ensure_webhook_registered(hass, entry, api)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

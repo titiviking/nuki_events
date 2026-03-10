@@ -15,7 +15,7 @@ def test_manifest_declares_oauth() -> None:
     oauth = manifest["oauth2"]
     assert oauth["authorization_url"].startswith("https://")
     assert oauth["token_url"].startswith("https://")
-    assert "webhook.write" in oauth["scopes"]
+    assert "webhook.decentral" in oauth["scopes"]
 
 
 def test_config_flow_uses_oauth_handler() -> None:
