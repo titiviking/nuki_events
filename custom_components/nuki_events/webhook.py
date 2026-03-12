@@ -22,8 +22,15 @@ class NukiWebhookView(HomeAssistantView):
     name = "api:nuki_events_webhook"
     url = "/api/nuki_events/webhook/{entry_id}"
 
+    def __init__(self, hass) -> None:
+        # HomeAssistantView injects self.hass at registration time, but that
+        # injection is not guaranteed to have occurred before the first request
+        # arrives (observed on Python 3.14 / HA 2026.x: AttributeError on
+        # self.hass).  Storing hass explicitly in __init__ is the safe pattern.
+        self._hass = hass
+
     async def post(self, request: web.Request, entry_id: str) -> web.Response:
-        data = self.hass.data.get(DOMAIN, {}).get(entry_id)
+        data = self._hass.data.get(DOMAIN, {}).get(entry_id)
         if not data:
             _LOGGER.debug("Webhook received for unknown entry_id=%s", entry_id)
             return web.Response(status=404, text="Unknown entry")
