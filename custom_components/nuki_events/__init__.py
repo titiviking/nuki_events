@@ -190,7 +190,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Register webhook view once
     if not hass.data[DOMAIN].get("_view_registered"):
-        hass.http.register_view(NukiWebhookView())
+        hass.http.register_view(NukiWebhookView(hass))
         hass.data[DOMAIN]["_view_registered"] = True
 
     # Create HA OAuth session (standard pattern)
@@ -240,6 +240,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # logged as warnings and entity setup continues regardless.
     await _ensure_webhook_registered(hass, entry, api)
 
+    # Re-sync hass.data from entry.data after _ensure_webhook_registered, which
+    # may have persisted a brand-new webhook_id/secret via async_update_entry.
+    # Without this sync the in-memory dict still holds whatever was there before
+    # (possibly None if the old credentials were cleared), so incoming webhooks
+    # would be rejected with 401 until the next full HA restart.
+    hass.data[DOMAIN][entry.entry_id]["webhook_id"] = entry.data.get(CONF_WEBHOOK_ID)
+    hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = entry.data.get(CONF_WEBHOOK_SECRET)
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
@@ -273,4 +281,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         remaining = [k for k in hass.data.get(DOMAIN, {}) if k != "_view_registered"]
         if not remaining:
             hass.data.get(DOMAIN, {}).pop("_view_registered", None)
+
+        # Clear the persisted webhook credentials so the next load starts fresh.
+        # Without this, entry.data still holds the old webhook_id/secret that was
+        # just deleted from the Nuki server. On the next load _ensure_webhook_registered
+        # detects the stale id, wipes it mid-setup, and re-registers — but hass.data
+        # is seeded with the OLD secret BEFORE that function runs, leaving a window
+        # where incoming webhooks are rejected with 401 and silently dropped.
+        new_data = {
+            k: v
+            for k, v in entry.data.items()
+            if k not in (CONF_WEBHOOK_ID, CONF_WEBHOOK_SECRET)
+        }
+        if new_data != dict(entry.data):
+            hass.config_entries.async_update_entry(entry, data=new_data)
+            _LOGGER.debug("Cleared stale webhook credentials from entry.data on unload.")
+
     return unload_ok
