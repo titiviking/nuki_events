@@ -53,7 +53,20 @@ class NukiWebhookView(HomeAssistantView):
 
         expected = _hmac_sha256_hex(secret, body)
         if not signature or not hmac.compare_digest(signature.lower(), expected.lower()):
-            _LOGGER.warning("Invalid Nuki webhook signature (entry=%s).", entry_id)
+            # Log the secret length (never the secret itself) so mismatches caused
+            # by a stale/wrong secret stored in hass.data can be diagnosed without
+            # exposing the credential.  A length of 0 or None means the secret was
+            # never properly persisted — reload the integration to re-register.
+            _LOGGER.warning(
+                "Invalid Nuki webhook signature (entry=%s). "
+                "Received: %.8s… Expected: %.8s… Secret length: %d chars. "
+                "If this persists after updating to v2.5.3+, reload the integration "
+                "to force fresh webhook re-registration.",
+                entry_id,
+                signature,
+                expected,
+                len(secret),
+            )
             return web.Response(status=401, text="Bad signature")
 
         try:

@@ -56,14 +56,20 @@ NUKI_ACTION = {
 }
 
 NUKI_TRIGGER = {
+    # Source: Nuki Web API Webhook Spec v1.1
+    # trigger: 0=system, 1=manual, 2=button, 3=automatic, 4=web, 5=app,
+    #          6=auto_lock, 7=accessory, 255=keypad
+    # Note: previous versions incorrectly had 4=app, 5=auto_lock, 6=keypad,
+    #       7=fingerprint — all shifted by one and wrong labels.
     0: "system",
     1: "manual",
     2: "button",
     3: "automatic",
-    4: "app",
-    5: "auto_lock",
-    6: "keypad",
-    7: "fingerprint",
+    4: "web",
+    5: "app",
+    6: "auto_lock",
+    7: "accessory",
+    255: "keypad",
 }
 
 NUKI_SOURCE = {
