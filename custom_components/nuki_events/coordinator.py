@@ -333,6 +333,14 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         diag["status"] = "matched" if (diag["url_match"] and diag["secret_match"]) else "unmatched"
 
         self._data["webhook_diagnostic"] = diag
+        # Push the result into coordinator.data so sensors re-render immediately.
+        # Without this call async_run_webhook_diagnostic writes into self._data
+        # but coordinator.data (the snapshot sensors read) is never refreshed,
+        # leaving the diagnostic sensor permanently at its initial None / Unknown.
+        self.async_set_updated_data(
+            {k: dict(v) if isinstance(v, dict) else v for k, v in self._data.items()}
+        )
+
         _LOGGER.debug(
             "Webhook diagnostic: status=%s url_match=%s secret_match=%s live_endpoints=%d",
             diag["status"],
@@ -341,10 +349,6 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             len(diag["live_endpoints"]),
         )
 
-
-    # ------------------------------------------------------------------
-    # Webhook diagnostic
-    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Webhook handling
