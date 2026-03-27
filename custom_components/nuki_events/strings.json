@@ -21,7 +21,7 @@
     }
   },
   "application_credentials": {
-    "description": "In Nuki Web, go to **Menu \u2192 API** and request/enable **Advanced API Integration**. Create an OAuth2 API Key/Secret and add Home Assistant's redirect URL(s). Then enter the credentials below. See {docs_url}."
+    "description": "In Nuki Web, go to **Menu → API** and request/enable **Advanced API Integration**. Create an OAuth2 API Key/Secret and add Home Assistant's redirect URL(s). Then enter the credentials below. See {docs_url}."
   },
   "entity": {
     "sensor": {
@@ -30,6 +30,9 @@
       },
       "last_action": {
         "name": "Last Action"
+      },
+      "webhook_diagnostic": {
+        "name": "Webhook Diagnostic"
       }
     }
   }

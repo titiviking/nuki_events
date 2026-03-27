@@ -224,7 +224,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     api = NukiApi(hass, entry, oauth_session=oauth_session)
 
-    coordinator = NukiDataCoordinator(hass, api)
+    coordinator = NukiDataCoordinator(hass, api, entry_id=entry.entry_id, entry_data=dict(entry.data))
     await coordinator.async_config_entry_first_refresh()
 
     hass.data[DOMAIN][entry.entry_id] = {
@@ -247,6 +247,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # would be rejected with 401 until the next full HA restart.
     hass.data[DOMAIN][entry.entry_id]["webhook_id"] = entry.data.get(CONF_WEBHOOK_ID)
     hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = entry.data.get(CONF_WEBHOOK_SECRET)
+    # Keep coordinator's cached entry_data in sync so the diagnostic sensor
+    # always works against the freshly persisted credentials.
+    coordinator._entry_data = dict(entry.data)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
