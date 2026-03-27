@@ -11,6 +11,8 @@ WEBHOOK_PATH = "/api/nuki_events/webhook"
 
 CONF_WEBHOOK_ID = "webhook_id"
 CONF_WEBHOOK_SECRET = "webhook_secret"
+CONF_WEBHOOK_URL = "webhook_url"    # full registered URL, cached for change detection
+CONF_WEBHOOK_TOKEN = "webhook_token"  # random per-registration URL suffix
 
 WEBHOOK_FEATURE_DEVICE_STATUS = "DEVICE_STATUS"
 WEBHOOK_FEATURE_DEVICE_LOGS = "DEVICE_LOGS"
