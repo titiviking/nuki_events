@@ -5,11 +5,14 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers.network import get_url
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import NukiApi
 from .const import (
+    CONF_WEBHOOK_ID,
+    CONF_WEBHOOK_SECRET,
+    CONF_WEBHOOK_TOKEN,
+    CONF_WEBHOOK_URL,
     DOMAIN,
     NUKI_ACTION,
     NUKI_DEVICE_TYPE,
@@ -232,7 +235,7 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # Webhook diagnostic
     # ------------------------------------------------------------------
 
-    async def async_run_webhook_diagnostic(self, live_endpoints: list | None = None) -> None:
+    async def async_run_webhook_diagnostic(self, live_endpoints: list | None = None, secret_valid: bool | None = None) -> None:
         """Fetch all registered decentral webhooks and compare against this entry.
 
         Populates self._data["webhook_diagnostic"] with:
@@ -252,7 +255,7 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         diag: dict = {
             "status": None,
-            "registered_id": self._entry_data.get("webhook_id"),
+            "registered_id": self._entry_data.get(CONF_WEBHOOK_ID),
             "registered_url": None,
             "registered_features": None,
             "live_endpoints": [],
@@ -262,17 +265,17 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "error": None,
         }
 
-        # Build the URL we expect to be registered on Nuki's side.
-        try:
-            from .const import WEBHOOK_PATH
-            base = get_url(self.hass, prefer_external=True)
-            expected_url = f"{base}{WEBHOOK_PATH}/{self._entry_id}"
-            diag["registered_url"] = expected_url
-        except Exception as err:
+        # Use the cached URL from entry_data — it was stored at registration time
+        # and is the authoritative value to compare against the live list.
+        # Rebuilding from get_url() would be wrong if the external URL changed
+        # between the registration and this diagnostic run.
+        expected_url = self._entry_data.get(CONF_WEBHOOK_URL)
+        diag["registered_url"] = expected_url
+        if not expected_url:
             diag["status"] = "error"
-            diag["error"] = f"Could not build expected URL: {err}"
+            diag["error"] = "No webhook URL cached in entry data — reload to re-register."
             self._data["webhook_diagnostic"] = diag
-            _LOGGER.warning("Webhook diagnostic: could not build expected URL: %s", err)
+            _LOGGER.warning("Webhook diagnostic: no cached URL in entry_data.")
             return
 
         # Use pre-fetched endpoints when provided (e.g. passed from setup after
@@ -316,23 +319,38 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if matching_endpoint is not None:
             diag["registered_features"] = matching_endpoint.get("webhookFeatures", [])
 
-        # Secret verification proxy: Nuki's GET endpoint does not return secrets,
-        # so we verify by comparing the stored webhook_id against the live
-        # endpoint's id.  Same registration → same secret was used → match.
-        # Different id → webhook was re-registered externally → secret is stale.
-        stored_id = self._entry_data.get("webhook_id")
-        if matching_endpoint is not None:
-            live_id = matching_endpoint.get("id")
-            try:
-                diag["secret_match"] = (
-                    stored_id is not None
-                    and live_id is not None
-                    and int(stored_id) == int(live_id)
-                )
-            except (TypeError, ValueError):
-                diag["secret_match"] = False
+        # Secret validity: if the caller (setup flow) already performed the
+        # authoritative check via _ensure_webhook_registered, use its result
+        # directly.  That function verifies both webhook_id AND URL match, which
+        # is the strongest proxy available since Nuki does not expose secrets in
+        # GET responses.
+        #
+        # When called standalone (no secret_valid supplied), fall back to the
+        # ID-equality heuristic: find the live endpoint matching our URL and
+        # compare its id against the stored id.  If they match the registration
+        # is ours and the secret is almost certainly still correct.
+        if secret_valid is not None:
+            diag["secret_match"] = secret_valid and matching_endpoint is not None
         else:
-            diag["secret_match"] = False
+            # Standalone heuristic: all three credentials must be cached and
+            # the live endpoint's id must match the stored id.
+            stored_id = self._entry_data.get(CONF_WEBHOOK_ID)
+            stored_secret = self._entry_data.get(CONF_WEBHOOK_SECRET)
+            stored_url = self._entry_data.get(CONF_WEBHOOK_URL)
+            if matching_endpoint is not None:
+                live_id = matching_endpoint.get("id")
+                try:
+                    diag["secret_match"] = (
+                        stored_id is not None
+                        and stored_secret is not None
+                        and stored_url is not None
+                        and live_id is not None
+                        and int(stored_id) == int(live_id)
+                    )
+                except (TypeError, ValueError):
+                    diag["secret_match"] = False
+            else:
+                diag["secret_match"] = False
 
         diag["status"] = "matched" if (diag["url_match"] and diag["secret_match"]) else "unmatched"
 
