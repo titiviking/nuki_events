@@ -259,9 +259,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "OAuth2 implementation temporarily unavailable, will retry"
         ) from err
 
-    oauth_session = config_entry_oauth2_flow.OAuth2Session(hass, entry, implementation)
-
-    # Normalize legacy token storage and ensure expires_at for HA refresh logic.
+    # Normalize legacy token storage and ensure expires_at BEFORE creating the
+    # OAuth session.  OAuth2Session reads entry.data at construction time; if
+    # expires_at is missing the session's internal token dict will lack it and
+    # async_ensure_token_valid() raises KeyError: 'expires_at' on the first API
+    # call (observed as the "Could not fetch live webhooks: 'expires_at'" warning).
     new_token = _normalize_and_enrich_token(entry)
     if new_token is not None:
         new_data = dict(entry.data)
@@ -276,6 +278,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ):
             new_data.pop(key, None)
         hass.config_entries.async_update_entry(entry, data=new_data)
+
+    # Create OAuth session after normalisation so it picks up the enriched token.
+    oauth_session = config_entry_oauth2_flow.OAuth2Session(hass, entry, implementation)
 
     api = NukiApi(hass, entry, oauth_session=oauth_session)
 

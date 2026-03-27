@@ -110,11 +110,9 @@ class NukiLastActorSensor(NukiBaseSensor):
 
         # Seed the coordinator's in-memory state so that native_value reflects
         # the restored data immediately and all attribute reads are consistent.
-        extra = (
-            last_sensor_data.extra_data.as_dict()
-            if last_sensor_data.extra_data
-            else {}
-        )
+        # SensorExtraStoredData exposes .extra (a plain dict or None),
+        # not .extra_data — using the wrong attribute raised AttributeError.
+        extra = last_sensor_data.extra.as_dict() if last_sensor_data.extra else {}
         self.coordinator.restore_state(self._id, actor=str(restored_value), extra=extra)
 
     @property
@@ -175,11 +173,7 @@ class NukiLastActionSensor(NukiBaseSensor):
 
         # Seed the coordinator so native_value and attributes are consistent
         # from the first render, before any webhook or API data arrives.
-        extra = (
-            last_sensor_data.extra_data.as_dict()
-            if last_sensor_data.extra_data
-            else {}
-        )
+        extra = last_sensor_data.extra.as_dict() if last_sensor_data.extra else {}
         self.coordinator.restore_action_state(
             self._id, action=str(restored_value), extra=extra
         )
