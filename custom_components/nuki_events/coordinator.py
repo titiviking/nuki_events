@@ -232,7 +232,7 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # Webhook diagnostic
     # ------------------------------------------------------------------
 
-    async def async_run_webhook_diagnostic(self) -> None:
+    async def async_run_webhook_diagnostic(self, live_endpoints: list | None = None) -> None:
         """Fetch all registered decentral webhooks and compare against this entry.
 
         Populates self._data["webhook_diagnostic"] with:
@@ -275,15 +275,19 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.warning("Webhook diagnostic: could not build expected URL: %s", err)
             return
 
-        # Fetch all live endpoints from the Nuki API.
-        try:
-            live = await self.api.list_decentral_webhooks()
-        except Exception as err:
-            diag["status"] = "error"
-            diag["error"] = f"GET /api/decentralWebhook failed: {err}"
-            self._data["webhook_diagnostic"] = diag
-            _LOGGER.warning("Webhook diagnostic: API call failed: %s", err)
-            return
+        # Use pre-fetched endpoints when provided (e.g. passed from setup after
+        # _ensure_webhook_registered already called the API), otherwise fetch now.
+        if live_endpoints is not None:
+            live = live_endpoints
+        else:
+            try:
+                live = await self.api.list_decentral_webhooks()
+            except Exception as err:
+                diag["status"] = "error"
+                diag["error"] = f"GET /api/decentralWebhook failed: {err}"
+                self._data["webhook_diagnostic"] = diag
+                _LOGGER.warning("Webhook diagnostic: API call failed: %s", err)
+                return
 
         if not isinstance(live, list):
             diag["status"] = "error"
