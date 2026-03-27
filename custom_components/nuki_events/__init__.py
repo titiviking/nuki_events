@@ -251,6 +251,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # always works against the freshly persisted credentials.
     coordinator._entry_data = dict(entry.data)
 
+    # Run webhook diagnostic now — after registration is complete and entry_data
+    # is current — so the sensor shows the real state from the very first render.
+    # This is intentionally non-blocking: any failure is logged and setup continues.
+    await coordinator.async_run_webhook_diagnostic()
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 

@@ -79,9 +79,6 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Prime last-actor info from latest logs so state isn't 'unknown' after restart.
             await self._prime_from_latest_logs(locks)
 
-            # Run webhook diagnostic so the diagnostic sensor is always fresh.
-            await self._run_webhook_diagnostic()
-
             return {k: dict(v) if isinstance(v, dict) else v for k, v in self._data.items()}
 
         except ConfigEntryAuthFailed:
@@ -235,7 +232,7 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # Webhook diagnostic
     # ------------------------------------------------------------------
 
-    async def _run_webhook_diagnostic(self) -> None:
+    async def async_run_webhook_diagnostic(self) -> None:
         """Fetch all registered decentral webhooks and compare against this entry.
 
         Populates self._data["webhook_diagnostic"] with:

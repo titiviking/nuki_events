@@ -28,7 +28,6 @@ async def async_setup_entry(hass, entry, async_add_entities) -> None:
     # Integration-level webhook diagnostic sensor (one per config entry, not per lock).
     entities.append(NukiWebhookDiagnosticSensor(coordinator, entry))
     # Integration-level webhook diagnostic sensor (one per config entry, not per lock).
-    entities.append(NukiWebhookDiagnosticSensor(coordinator, entry))
     async_add_entities(entities)
 
 
@@ -247,69 +246,6 @@ class NukiWebhookDiagnosticSensor(CoordinatorEntity[NukiDataCoordinator], Restor
     @property
     def device_info(self) -> DeviceInfo:
         """Attach to an integration-level device, separate from individual locks."""
-        return DeviceInfo(
-            identifiers={(DOMAIN, f"{self._entry.entry_id}_integration")},
-            name="Nuki Events Integration",
-            manufacturer="Nuki",
-            model="Web API",
-            entry_type="service",
-        )
-
-    @property
-    def native_value(self) -> str | None:
-        diag = self.coordinator.data.get("webhook_diagnostic", {})
-        return diag.get("status")
-
-    @property
-    def extra_state_attributes(self) -> dict:
-        diag = self.coordinator.data.get("webhook_diagnostic", {})
-        return {
-            "registered_id": diag.get("registered_id"),
-            "registered_url": diag.get("registered_url"),
-            "registered_features": diag.get("registered_features"),
-            "live_endpoints": diag.get("live_endpoints", []),
-            "url_match": diag.get("url_match"),
-            "secret_match": diag.get("secret_match"),
-            "last_checked": diag.get("last_checked"),
-            "error": diag.get("error"),
-        }
-
-
-class NukiWebhookDiagnosticSensor(CoordinatorEntity[NukiDataCoordinator], RestoreSensor):
-    """Diagnostic sensor reporting whether the Nuki webhook registration is healthy.
-
-    Native value: "matched" | "unmatched" | "error" | None (pending first refresh)
-
-    Attributes expose the full picture:
-      registered_id       — webhook id stored in HA entry data
-      registered_url      — URL this integration expects to be registered on Nuki
-      registered_features — features subscribed on the matching live endpoint
-      live_endpoints      — all endpoints currently on the Nuki server (id/url/features)
-      url_match           — True if our URL is among the live endpoints
-      secret_match        — True if our stored webhook id matches the live endpoint id
-                            (Nuki does not expose secrets via the API; id equality is
-                            the best available proxy for secret correctness)
-      last_checked        — ISO-8601 timestamp of the last diagnostic run
-      error               — error message if the API call failed
-    """
-
-    _attr_has_entity_name = True
-    _attr_translation_key = "webhook_diagnostic"
-    _attr_icon = "mdi:webhook"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-    # These fields change on every refresh but carry no long-term historical value.
-    _unrecorded_attributes = frozenset({
-        "live_endpoints", "registered_features", "last_checked", "error"
-    })
-
-    def __init__(self, coordinator: NukiDataCoordinator, entry) -> None:
-        super().__init__(coordinator)
-        self._entry = entry
-        self._attr_unique_id = f"nuki_events_{entry.entry_id}_webhook_diagnostic"
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        """Attach to a dedicated integration-level device, separate from individual locks."""
         return DeviceInfo(
             identifiers={(DOMAIN, f"{self._entry.entry_id}_integration")},
             name="Nuki Events Integration",
