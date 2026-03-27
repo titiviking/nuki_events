@@ -82,106 +82,161 @@ async def _ensure_webhook_registered(
     hass: HomeAssistant,
     entry: ConfigEntry,
     api: NukiApi,
-) -> None:
-    """Ensure a valid decentral webhook is registered with Nuki.
+) -> list[dict]:
+    """Validate the cached webhook registration and reuse it when still valid.
 
-    On every entry load we verify the stored webhook_id still exists on the
-    Nuki server side.  If the webhook is gone (e.g. the user reset their Nuki
-    account, revoked the token, or the webhook was deleted externally) we clear
-    the stale id/secret and re-register so push events are not silently lost.
+    Returns the live endpoint list fetched from Nuki so the caller can pass it
+    directly to the diagnostic sensor, avoiding a redundant second API call.
 
-    All failures are treated as non-fatal: a warning is logged and entity setup
-    continues.  The integration can still poll for state on the next coordinator
-    refresh — it just won't receive real-time push events until the next
-    successful HA reload or until the webhook is restored manually.
+    Decision flow:
+      1. Fetch all live decentral webhooks from GET /api/decentralWebhook.
+      2. If the cached webhook_id AND the cached URL are both found in the live
+         list → registration is valid, retain credentials unchanged.
+      3. Otherwise → the cached registration is stale or missing:
+           a. Attempt to delete the cached webhook from Nuki (best-effort).
+           b. Clear cached credentials from entry.data and hass.data.
+           c. Register a fresh webhook, persist new id + secret.
+      4. Re-fetch the live list after any new registration so the returned
+         snapshot always reflects the final server state.
+
+    All failures are non-fatal: errors are logged and setup continues.
     """
     existing_webhook_id = entry.data.get(CONF_WEBHOOK_ID)
     existing_secret = entry.data.get(CONF_WEBHOOK_SECRET)
 
-    needs_registration = True  # default: register unless we confirm it's live
-
-    if existing_webhook_id and existing_secret:
-        # Verify the stored webhook still exists on the Nuki server.
-        try:
-            registered = await api.list_decentral_webhooks()
-            if isinstance(registered, list):
-                live_ids = {
-                    int(w["id"])
-                    for w in registered
-                    if isinstance(w, dict) and w.get("id") is not None
-                }
-                if int(existing_webhook_id) in live_ids:
-                    _LOGGER.debug(
-                        "Nuki webhook id=%s is still active; skipping re-registration.",
-                        existing_webhook_id,
-                    )
-                    needs_registration = False
-                else:
-                    _LOGGER.warning(
-                        "Stored Nuki webhook id=%s no longer exists on the server "
-                        "(found ids: %s). Clearing stale credentials and re-registering.",
-                        existing_webhook_id,
-                        live_ids,
-                    )
-                    # Clear stale data so we fall through to re-registration below.
-                    new_data = dict(entry.data)
-                    new_data.pop(CONF_WEBHOOK_ID, None)
-                    new_data.pop(CONF_WEBHOOK_SECRET, None)
-                    hass.config_entries.async_update_entry(entry, data=new_data)
-                    hass.data[DOMAIN][entry.entry_id]["webhook_id"] = None
-                    hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = None
-            else:
-                # Unexpected response shape — log and attempt re-registration to be safe.
-                _LOGGER.warning(
-                    "Unexpected response from GET /api/decentralWebhook: %r. "
-                    "Will attempt re-registration.",
-                    registered,
-                )
-        except Exception as err:  # noqa: BLE001
-            # Network error, auth failure, etc.  Do not block setup — keep the
-            # existing credentials in place and skip re-registration this cycle.
-            _LOGGER.warning(
-                "Could not verify Nuki webhook liveness (will keep existing "
-                "credentials): %s",
-                err,
-            )
-            needs_registration = False
-
-    if not needs_registration:
-        return
-
-    # Register a fresh webhook.
+    # Build the URL we expect to be registered.
     try:
         base = get_url(hass, prefer_external=True)
         webhook_url = f"{base}{WEBHOOK_PATH}/{entry.entry_id}"
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.error("Could not determine external URL for webhook: %s", err)
+        return []
 
+    # ------------------------------------------------------------------ #
+    # Step 1 — Fetch all live endpoints                                   #
+    # ------------------------------------------------------------------ #
+    try:
+        live_endpoints = await api.list_decentral_webhooks()
+        if not isinstance(live_endpoints, list):
+            _LOGGER.warning(
+                "Unexpected response from GET /api/decentralWebhook: %r. "
+                "Will attempt fresh registration.",
+                live_endpoints,
+            )
+            live_endpoints = []
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning(
+            "Could not fetch live webhooks (will keep existing credentials): %s", err
+        )
+        return []
+
+    # ------------------------------------------------------------------ #
+    # Step 2 — Check if cached registration is still valid               #
+    # A valid registration requires both:                                 #
+    #   • the cached webhook_id is present in the live list, AND          #
+    #   • the live endpoint's URL matches our expected URL                 #
+    #   (Nuki does not expose secrets via GET, so URL+ID is the best      #
+    #    available proxy for "the secret we stored is still correct")      #
+    # ------------------------------------------------------------------ #
+    if existing_webhook_id and existing_secret:
+        matching = next(
+            (
+                w for w in live_endpoints
+                if isinstance(w, dict)
+                and w.get("id") is not None
+                and int(w["id"]) == int(existing_webhook_id)
+                and w.get("webhookUrl") == webhook_url
+            ),
+            None,
+        )
+        if matching is not None:
+            _LOGGER.debug(
+                "Nuki webhook id=%s is still active and URL matches; "
+                "reusing existing registration.",
+                existing_webhook_id,
+            )
+            return live_endpoints  # ← reuse: no changes needed
+
+        _LOGGER.warning(
+            "Cached webhook id=%s is stale or URL mismatch (expected %s). "
+            "Will deregister and re-register.",
+            existing_webhook_id,
+            webhook_url,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Step 3a — Best-effort deregister stale webhook                     #
+    # ------------------------------------------------------------------ #
+    if existing_webhook_id:
+        try:
+            await api.delete_decentral_webhook(existing_webhook_id)
+            _LOGGER.debug(
+                "Deregistered stale webhook id=%s before re-registration.",
+                existing_webhook_id,
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Could not deregister stale webhook id=%s (continuing anyway): %s",
+                existing_webhook_id,
+                err,
+            )
+
+    # ------------------------------------------------------------------ #
+    # Step 3b — Clear stale credentials                                  #
+    # ------------------------------------------------------------------ #
+    new_data = {
+        k: v for k, v in entry.data.items()
+        if k not in (CONF_WEBHOOK_ID, CONF_WEBHOOK_SECRET)
+    }
+    hass.config_entries.async_update_entry(entry, data=new_data)
+    hass.data[DOMAIN][entry.entry_id]["webhook_id"] = None
+    hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = None
+
+    # ------------------------------------------------------------------ #
+    # Step 3c — Register fresh webhook                                   #
+    # ------------------------------------------------------------------ #
+    try:
         resp = await api.register_decentral_webhook(
             webhook_url=webhook_url, features=DEFAULT_WEBHOOK_FEATURES
         )
 
         if isinstance(resp, dict):
-            webhook_id = resp.get("id")
-            secret = resp.get("secret")
+            new_id = resp.get("id")
+            new_secret = resp.get("secret")
 
-            new_data = dict(entry.data)
-            if webhook_id is not None:
-                new_data[CONF_WEBHOOK_ID] = int(webhook_id)
-                hass.data[DOMAIN][entry.entry_id]["webhook_id"] = int(webhook_id)
-            if secret:
-                new_data[CONF_WEBHOOK_SECRET] = secret
-                hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = secret
+            fresh_data = dict(entry.data)
+            if new_id is not None:
+                fresh_data[CONF_WEBHOOK_ID] = int(new_id)
+                hass.data[DOMAIN][entry.entry_id]["webhook_id"] = int(new_id)
+            if new_secret:
+                fresh_data[CONF_WEBHOOK_SECRET] = new_secret
+                hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = new_secret
 
-            hass.config_entries.async_update_entry(entry, data=new_data)
+            hass.config_entries.async_update_entry(entry, data=fresh_data)
             _LOGGER.debug(
-                "Nuki decentral webhook registered successfully (id=%s).", webhook_id
+                "Nuki decentral webhook registered successfully (id=%s).", new_id
             )
         else:
             _LOGGER.error(
                 "Webhook registration returned unexpected response: %r", resp
             )
+            return live_endpoints
 
     except Exception as err:  # noqa: BLE001
         _LOGGER.error("Failed to register Nuki decentral webhook: %s", err)
+        return live_endpoints
+
+    # ------------------------------------------------------------------ #
+    # Step 4 — Re-fetch live endpoints to reflect the new registration   #
+    # ------------------------------------------------------------------ #
+    try:
+        live_endpoints = await api.list_decentral_webhooks()
+        if not isinstance(live_endpoints, list):
+            live_endpoints = []
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Could not re-fetch webhooks after registration: %s", err)
+
+    return live_endpoints
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -235,51 +290,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "oauth_session": oauth_session,
     }
 
-    # Verify the stored webhook is still live on the Nuki server and re-register
-    # if it has gone missing.  This is intentionally non-blocking: failures are
-    # logged as warnings and entity setup continues regardless.
-    await _ensure_webhook_registered(hass, entry, api)
+    # Validate the cached webhook registration; reuse if still valid, otherwise
+    # deregister and re-register.  Returns the current live endpoint list from
+    # Nuki so we can feed it directly to the diagnostic sensor without an extra
+    # API call.
+    live_endpoints = await _ensure_webhook_registered(hass, entry, api)
 
     # Re-sync hass.data from entry.data after _ensure_webhook_registered, which
     # may have persisted a brand-new webhook_id/secret via async_update_entry.
-    # Without this sync the in-memory dict still holds whatever was there before
-    # (possibly None if the old credentials were cleared), so incoming webhooks
-    # would be rejected with 401 until the next full HA restart.
     hass.data[DOMAIN][entry.entry_id]["webhook_id"] = entry.data.get(CONF_WEBHOOK_ID)
     hass.data[DOMAIN][entry.entry_id]["webhook_secret"] = entry.data.get(CONF_WEBHOOK_SECRET)
     # Keep coordinator's cached entry_data in sync so the diagnostic sensor
     # always works against the freshly persisted credentials.
     coordinator._entry_data = dict(entry.data)
 
-    # Run webhook diagnostic now — after registration is complete and entry_data
-    # is current — so the sensor shows the real state from the very first render.
-    # This is intentionally non-blocking: any failure is logged and setup continues.
-    await coordinator.async_run_webhook_diagnostic()
+    # Run diagnostic with the live endpoint list already in hand — no extra API
+    # call needed.  This populates the diagnostic sensor before the first render.
+    await coordinator.async_run_webhook_diagnostic(live_endpoints=live_endpoints)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
-    # Best-effort: remove the decentral webhook from Nuki's server so it stops
-    # posting to a URL that will no longer be handled.  Failure is non-fatal —
-    # the entry is unloaded regardless; a stale registration will be cleaned up
-    # on the next successful setup via _ensure_webhook_registered.
-    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-    webhook_id = entry.data.get(CONF_WEBHOOK_ID)
-    api: NukiApi | None = entry_data.get("api")
-    if webhook_id and api:
-        try:
-            await api.delete_decentral_webhook(webhook_id)
-            _LOGGER.debug("Deleted Nuki decentral webhook id=%s on unload.", webhook_id)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.warning(
-                "Could not delete Nuki webhook id=%s on unload (will be cleaned up on next load): %s",
-                webhook_id,
-                err,
-            )
+    """Unload a config entry.
 
+    The Nuki webhook registration is intentionally kept alive across reloads and
+    restarts.  On the next load _ensure_webhook_registered will verify the cached
+    credentials are still valid and reuse them, avoiding an unnecessary delete +
+    re-register cycle (and the associated Nuki API calls and new secret churn).
+
+    The webhook is only deregistered when _ensure_webhook_registered detects that
+    the cached registration is no longer valid (wrong URL, missing id, etc.), or
+    when the integration is fully removed by the user.
+    """
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
@@ -289,20 +333,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         remaining = [k for k in hass.data.get(DOMAIN, {}) if k != "_view_registered"]
         if not remaining:
             hass.data.get(DOMAIN, {}).pop("_view_registered", None)
-
-        # Clear the persisted webhook credentials so the next load starts fresh.
-        # Without this, entry.data still holds the old webhook_id/secret that was
-        # just deleted from the Nuki server. On the next load _ensure_webhook_registered
-        # detects the stale id, wipes it mid-setup, and re-registers — but hass.data
-        # is seeded with the OLD secret BEFORE that function runs, leaving a window
-        # where incoming webhooks are rejected with 401 and silently dropped.
-        new_data = {
-            k: v
-            for k, v in entry.data.items()
-            if k not in (CONF_WEBHOOK_ID, CONF_WEBHOOK_SECRET)
-        }
-        if new_data != dict(entry.data):
-            hass.config_entries.async_update_entry(entry, data=new_data)
-            _LOGGER.debug("Cleared stale webhook credentials from entry.data on unload.")
+        _LOGGER.debug(
+            "Nuki webhook id=%s retained on Nuki server (will be validated on next load).",
+            entry.data.get(CONF_WEBHOOK_ID),
+        )
 
     return unload_ok
