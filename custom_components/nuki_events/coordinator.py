@@ -5,6 +5,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.network import get_url
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import NukiApi
@@ -29,9 +30,11 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     webhook arrives.
     """
 
-    def __init__(self, hass: HomeAssistant, api: NukiApi) -> None:
+    def __init__(self, hass: HomeAssistant, api: NukiApi, entry_id: str = "", entry_data: dict | None = None) -> None:
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=None)
         self.api = api
+        self._entry_id = entry_id
+        self._entry_data: dict = entry_data or {}
 
         self._data: dict[str, Any] = {
             "locks": [],
@@ -45,6 +48,18 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "last_date": {},
             "event_counter": {},
             "last_device_status": {},
+            # Webhook diagnostic — populated on each coordinator refresh
+            "webhook_diagnostic": {
+                "status": None,
+                "registered_id": None,
+                "registered_url": None,
+                "registered_features": None,
+                "live_endpoints": [],
+                "url_match": None,
+                "secret_match": None,
+                "last_checked": None,
+                "error": None,
+            },
         }
 
         # Per-lock auth name cache: {sl_id: {auth_id: name}}.
@@ -63,6 +78,9 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Prime last-actor info from latest logs so state isn't 'unknown' after restart.
             await self._prime_from_latest_logs(locks)
+
+            # Run webhook diagnostic so the diagnostic sensor is always fresh.
+            await self._run_webhook_diagnostic()
 
             return {k: dict(v) if isinstance(v, dict) else v for k, v in self._data.items()}
 
@@ -212,81 +230,124 @@ class NukiDataCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return None
 
+
     # ------------------------------------------------------------------
-    # State restoration (RestoreSensor)
+    # Webhook diagnostic
     # ------------------------------------------------------------------
 
-    def restore_state(
-        self, sl_id: int, actor: str, extra: dict[str, Any]
-    ) -> None:
-        """Seed coordinator data from a restored NukiLastActorSensor state.
+    async def _run_webhook_diagnostic(self) -> None:
+        """Fetch all registered decentral webhooks and compare against this entry.
 
-        Called by NukiLastActorSensor.async_added_to_hass only when the
-        coordinator has no live data for this lock yet (i.e. API priming
-        returned nothing).  Populates every sub-dict that the sensor's
-        extra_state_attributes reads so that all fields are consistent from
-        the very first render.
+        Populates self._data["webhook_diagnostic"] with:
+          status             "matched" | "unmatched" | "error"
+          registered_id      webhook id stored in entry.data
+          registered_url     the URL this entry expects to be registered
+          registered_features  features of the matching live endpoint
+          live_endpoints     list of all endpoints from GET /api/decentralWebhook
+          url_match          True if our expected URL is found on the server
+          secret_match       True if the stored webhook_id matches the live
+                             endpoint id for our URL (Nuki does not expose
+                             secrets via GET so ID equality is the best proxy)
+          last_checked       ISO-8601 timestamp of this run
+          error              error message if the API call failed
         """
-        self._data["last_actor"].setdefault(sl_id, actor)
+        import datetime
 
-        # Restore rich attributes from the persisted extra_data dict so that
-        # the full context (action, trigger, date, etc.) is also available
-        # immediately — not just the primary native_value.
-        for dest_key, extra_key in (
-            ("last_action", "action"),
-            ("last_trigger", "trigger"),
-            ("last_completion_state", "completion_state"),
-            ("last_source", "source"),
-            ("last_device_type", "deviceType"),
-            ("last_date", "date"),
-        ):
-            val = extra.get(extra_key)
-            if val is not None:
-                self._data[dest_key].setdefault(sl_id, val)
+        diag: dict = {
+            "status": None,
+            "registered_id": self._entry_data.get("webhook_id"),
+            "registered_url": None,
+            "registered_features": None,
+            "live_endpoints": [],
+            "url_match": False,
+            "secret_match": None,
+            "last_checked": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "error": None,
+        }
 
-        auth_id = extra.get("authId")
-        if auth_id is not None:
+        # Build the URL we expect to be registered on Nuki's side.
+        try:
+            from .const import WEBHOOK_PATH
+            base = get_url(self.hass, prefer_external=True)
+            expected_url = f"{base}{WEBHOOK_PATH}/{self._entry_id}"
+            diag["registered_url"] = expected_url
+        except Exception as err:
+            diag["status"] = "error"
+            diag["error"] = f"Could not build expected URL: {err}"
+            self._data["webhook_diagnostic"] = diag
+            _LOGGER.warning("Webhook diagnostic: could not build expected URL: %s", err)
+            return
+
+        # Fetch all live endpoints from the Nuki API.
+        try:
+            live = await self.api.list_decentral_webhooks()
+        except Exception as err:
+            diag["status"] = "error"
+            diag["error"] = f"GET /api/decentralWebhook failed: {err}"
+            self._data["webhook_diagnostic"] = diag
+            _LOGGER.warning("Webhook diagnostic: API call failed: %s", err)
+            return
+
+        if not isinstance(live, list):
+            diag["status"] = "error"
+            diag["error"] = f"Unexpected response shape: {type(live).__name__}"
+            self._data["webhook_diagnostic"] = diag
+            return
+
+        # Summarise all live endpoints (omit secrets — not returned by API anyway).
+        diag["live_endpoints"] = [
+            {
+                "id": e.get("id"),
+                "url": e.get("webhookUrl"),
+                "features": e.get("webhookFeatures", []),
+            }
+            for e in live
+            if isinstance(e, dict)
+        ]
+
+        # Find the endpoint whose URL matches ours.
+        matching_endpoint = next(
+            (e for e in live if isinstance(e, dict) and e.get("webhookUrl") == expected_url),
+            None,
+        )
+        diag["url_match"] = matching_endpoint is not None
+
+        if matching_endpoint is not None:
+            diag["registered_features"] = matching_endpoint.get("webhookFeatures", [])
+
+        # Secret verification proxy: Nuki's GET endpoint does not return secrets,
+        # so we verify by comparing the stored webhook_id against the live
+        # endpoint's id.  Same registration → same secret was used → match.
+        # Different id → webhook was re-registered externally → secret is stale.
+        stored_id = self._entry_data.get("webhook_id")
+        if matching_endpoint is not None:
+            live_id = matching_endpoint.get("id")
             try:
-                self._data["last_auth_id"].setdefault(sl_id, int(auth_id))
+                diag["secret_match"] = (
+                    stored_id is not None
+                    and live_id is not None
+                    and int(stored_id) == int(live_id)
+                )
             except (TypeError, ValueError):
-                pass
+                diag["secret_match"] = False
+        else:
+            diag["secret_match"] = False
 
+        diag["status"] = "matched" if (diag["url_match"] and diag["secret_match"]) else "unmatched"
+
+        self._data["webhook_diagnostic"] = diag
         _LOGGER.debug(
-            "Coordinator: restored actor state for smartlockId=%s from HA storage.", sl_id
+            "Webhook diagnostic: status=%s url_match=%s secret_match=%s live_endpoints=%d",
+            diag["status"],
+            diag["url_match"],
+            diag["secret_match"],
+            len(diag["live_endpoints"]),
         )
 
-    def restore_action_state(
-        self, sl_id: int, action: str, extra: dict[str, Any]
-    ) -> None:
-        """Seed coordinator data from a restored NukiLastActionSensor state.
 
-        Mirrors restore_state but seeds the action-centric fields.  The
-        actor field is also populated from the extra_data 'actor' key so
-        that both sensors are immediately consistent after a cold start.
-        """
-        # NukiLastActionSensor stores the formatted action string (e.g. "Lock")
-        # but the coordinator keeps the raw snake_case value.  We reverse the
-        # title-case formatting to get back to the stored enum label.
-        raw_action = action.replace(" ", "_").lower() if action else action
-        self._data["last_action"].setdefault(sl_id, raw_action)
-
-        for dest_key, extra_key in (
-            ("last_trigger", "trigger"),
-            ("last_completion_state", "completion_state"),
-            ("last_source", "source"),
-            ("last_date", "date"),
-        ):
-            val = extra.get(extra_key)
-            if val is not None:
-                self._data[dest_key].setdefault(sl_id, val)
-
-        actor = extra.get("actor")
-        if actor is not None:
-            self._data["last_actor"].setdefault(sl_id, actor)
-
-        _LOGGER.debug(
-            "Coordinator: restored action state for smartlockId=%s from HA storage.", sl_id
-        )
+    # ------------------------------------------------------------------
+    # Webhook diagnostic
+    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Webhook handling
