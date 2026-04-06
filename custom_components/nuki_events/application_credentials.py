@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from homeassistant.components.application_credentials import (
@@ -54,7 +55,11 @@ class NukiOAuth2Implementation(config_entry_oauth2_flow.LocalOAuth2Implementatio
                 raise config_entry_oauth2_flow.OAuth2RequestException(
                     f"Token exchange failed ({resp.status}): {body}"
                 )
-            return await resp.json()
+            new_token = await resp.json()
+
+        if "expires_in" in new_token and "expires_at" not in new_token:
+            new_token["expires_at"] = time.time() + int(new_token["expires_in"]) - 60
+        return new_token
 
     async def async_refresh_token(self, token: dict[str, Any]) -> dict[str, Any]:
         """Refresh an access token."""
@@ -81,7 +86,14 @@ class NukiOAuth2Implementation(config_entry_oauth2_flow.LocalOAuth2Implementatio
                 raise config_entry_oauth2_flow.OAuth2RequestException(
                     f"Token refresh failed ({resp.status}): {body}"
                 )
-            return await resp.json()
+            new_token = await resp.json()
+
+        # Nuki may omit refresh_token in the refresh response — carry the old one forward.
+        if "refresh_token" not in new_token and refresh_token:
+            new_token["refresh_token"] = refresh_token
+        if "expires_in" in new_token and "expires_at" not in new_token:
+            new_token["expires_at"] = time.time() + int(new_token["expires_in"]) - 60
+        return new_token
 
 
 async def async_get_authorization_server(hass: HomeAssistant) -> AuthorizationServer:
