@@ -302,6 +302,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Create OAuth session after normalisation so it picks up the enriched token.
     oauth_session = config_entry_oauth2_flow.OAuth2Session(hass, entry, implementation)
 
+    # Force a token refresh on every startup.  The stored access_token may have
+    # been invalidated server-side by Nuki (e.g. after a previous reauth issued a
+    # new one) even though expires_at still looks valid.  Backdating expires_at by
+    # 1 second guarantees async_ensure_token_valid() triggers a refresh and we
+    # always hit the API with a live access_token rather than a stale one.
+    _LOGGER.debug("Forcing proactive token refresh on startup")
+    try:
+        stale_data = dict(entry.data)
+        if "token" in stale_data and isinstance(stale_data["token"], dict):
+            stale_data["token"] = {**stale_data["token"], "expires_at": time.time() - 1}
+            hass.config_entries.async_update_entry(entry, data=stale_data)
+        await oauth_session.async_ensure_token_valid()
+    except config_entry_oauth2_flow.OAuth2TokenRequestReauthError as err:
+        raise ConfigEntryNotReady("Token refresh requires reauth — will retry") from err
+    except Exception as err:  # noqa: BLE001
+        raise ConfigEntryNotReady(f"Could not refresh OAuth token on startup: {err}") from err
+
     api = NukiApi(hass, entry, oauth_session=oauth_session)
 
     coordinator = NukiDataCoordinator(hass, api, entry_id=entry.entry_id, entry_data=dict(entry.data))
